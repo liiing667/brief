@@ -49,6 +49,11 @@ const (
 
 var xzStreamMagic = []byte{0xfd, '7', 'z', 'X', 'Z', 0x00}
 
+// errXZCorrupt marks a structurally invalid XZ sample. Resource-budget
+// failures continue to wrap errArchiveLimit so callers and reports can keep
+// malformed input and rejection-by-policy distinct.
+var errXZCorrupt = errors.New("corrupt xz data")
+
 type xzBlockHeader struct {
 	length           int
 	compressedSize   int64
@@ -65,12 +70,168 @@ type xzReader interface {
 	io.ByteReader
 }
 
+// xzResourceBudget is the aggregate budget for every stream in one sample.
+// XZ permits concatenated streams, so per-stream records stay local to index
+// validation while block and expansion totals are shared across the sample.
+type xzResourceBudget struct {
+	maxBlocks       int
+	maxUncompressed int64
+	blocks          int
+	uncompressed    int64
+}
+
+const (
+	xzMaxInt = int(^uint(0) >> 1)
+	xzMinInt = -xzMaxInt - 1
+)
+
+func newXZResourceBudget(args []any) *xzResourceBudget {
+	budget := &xzResourceBudget{
+		maxBlocks:       maxArchiveEntries,
+		maxUncompressed: maxArchiveExtractedBytes,
+	}
+	if len(args) == 0 {
+		return budget.normalized()
+	}
+
+	switch value := args[0].(type) {
+	case *xzResourceBudget:
+		return value.normalized()
+	case xzResourceBudget:
+		return value.normalized()
+	}
+
+	if len(args) == 1 {
+		// Accept an expansion budget when no aggregate block budget is given.
+		if limit, ok := xzAnyInt64(args[0]); ok {
+			budget.maxUncompressed = limit
+		}
+		return budget.normalized()
+	}
+
+	if limit, ok := xzAnyInt(args[0]); ok {
+		budget.maxBlocks = limit
+	}
+	if limit, ok := xzAnyInt64(args[1]); ok {
+		budget.maxUncompressed = limit
+	}
+	return budget.normalized()
+}
+
+func (b *xzResourceBudget) normalized() *xzResourceBudget {
+	if b.maxBlocks < 0 {
+		b.maxBlocks = 0
+	}
+	if b.maxUncompressed < 0 {
+		b.maxUncompressed = 0
+	}
+	return b
+}
+
+func xzAnyInt(value any) (int, bool) {
+	switch n := value.(type) {
+	case int:
+		return n, true
+	case int8:
+		return int(n), true
+	case int16:
+		return int(n), true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), n >= int64(xzMinInt) && n <= int64(xzMaxInt)
+	case uint:
+		return int(n), uint64(n) <= uint64(xzMaxInt)
+	case uint8:
+		return int(n), true
+	case uint16:
+		return int(n), true
+	case uint32:
+		return int(n), true
+	case uint64:
+		return int(n), n <= uint64(xzMaxInt)
+	default:
+		return 0, false
+	}
+}
+
+func xzAnyInt64(value any) (int64, bool) {
+	switch n := value.(type) {
+	case int:
+		return int64(n), true
+	case int8:
+		return int64(n), true
+	case int16:
+		return int64(n), true
+	case int32:
+		return int64(n), true
+	case int64:
+		return n, true
+	case uint:
+		return int64(n), uint64(n) <= 1<<63-1
+	case uint8:
+		return int64(n), true
+	case uint16:
+		return int64(n), true
+	case uint32:
+		return int64(n), true
+	case uint64:
+		if n > 1<<63-1 {
+			return 0, false
+		}
+		return int64(n), true
+	default:
+		return 0, false
+	}
+}
+
+func (b *xzResourceBudget) beginBlock() error {
+	if b == nil {
+		return nil
+	}
+	b.blocks++
+	if b.maxBlocks >= 0 && b.blocks > b.maxBlocks {
+		return fmt.Errorf("%w: more than %d xz blocks in the complete sample",
+			errArchiveLimit, b.maxBlocks)
+	}
+	return nil
+}
+
+func (b *xzResourceBudget) addUncompressed(size int64) error {
+	if b == nil {
+		return nil
+	}
+	if size < 0 {
+		return xzCorruptError("xz chunk has negative uncompressed size", nil)
+	}
+	if b.maxUncompressed >= 0 &&
+		(size > b.maxUncompressed || b.uncompressed > b.maxUncompressed-size) {
+		return fmt.Errorf("%w: xz expansion exceeds %d bytes across all streams",
+			errArchiveLimit, b.maxUncompressed)
+	}
+	b.uncompressed += size
+	return nil
+}
+
+func xzCorruptError(context string, err error) error {
+	if err == nil {
+		return fmt.Errorf("%w: %s", errXZCorrupt, context)
+	}
+	if errors.Is(err, errArchiveLimit) {
+		return err
+	}
+	return fmt.Errorf("%w: %s: %w", errXZCorrupt, context, err)
+}
+
 // preflightXZ validates every LZMA2 block header and chunk boundary before
 // xz.NewReader can allocate the dictionary declared by an untrusted stream.
-func preflightXZ(r io.Reader, maxDictionaryBytes uint64) error {
+// Variadic limits accept either an aggregate expansion budget or block and
+// expansion budgets while retaining the original two-argument call shape.
+func preflightXZ(r io.Reader, maxDictionaryBytes uint64, limits ...any) error {
+	budget := newXZResourceBudget(limits)
 	br := bufio.NewReader(r)
 	for {
-		if err := preflightXZStream(br, maxDictionaryBytes); err != nil {
+		if err := preflightXZStream(br, maxDictionaryBytes, budget); err != nil {
 			return fmt.Errorf("reading xz: %w", err)
 		}
 
@@ -80,23 +241,24 @@ func preflightXZ(r io.Reader, maxDictionaryBytes uint64) error {
 				return nil
 			}
 			if err != nil {
-				return fmt.Errorf("reading xz stream padding: %w", err)
+				return xzCorruptError("reading xz stream padding", err)
 			}
 			if prefix[0] != 0 {
 				break
 			}
 			var padding [4]byte
 			if _, err := io.ReadFull(br, padding[:]); err != nil {
-				return fmt.Errorf("reading xz stream padding: %w", err)
+				return xzCorruptError("reading xz stream padding", err)
 			}
 			if !xzAllZeros(padding[:]) {
-				return errors.New("xz stream padding is not aligned")
+				return xzCorruptError("xz stream padding is not aligned", nil)
 			}
 		}
 	}
 }
 
-func preflightXZStream(r xzReader, maxDictionaryBytes uint64) error {
+func preflightXZStream(r xzReader, maxDictionaryBytes uint64, limits ...any) error {
+	budget := newXZResourceBudget(limits)
 	flags, checkSize, err := readXZStreamHeader(r)
 	if err != nil {
 		return err
@@ -106,7 +268,7 @@ func preflightXZStream(r xzReader, maxDictionaryBytes uint64) error {
 	for {
 		first, err := r.ReadByte()
 		if err != nil {
-			return err
+			return xzCorruptError("reading xz block or index indicator", err)
 		}
 		if first == 0 {
 			indexSize, err := readXZIndex(r, records)
@@ -116,53 +278,53 @@ func preflightXZStream(r xzReader, maxDictionaryBytes uint64) error {
 			return readXZStreamFooter(r, flags, indexSize)
 		}
 
+		if err := budget.beginBlock(); err != nil {
+			return err
+		}
 		header, err := readXZBlockHeader(r, first, maxDictionaryBytes)
 		if err != nil {
 			return err
 		}
-		compressedSize, uncompressedSize, err := scanXZLZMA2(r)
+		compressedSize, uncompressedSize, err := scanXZLZMA2(r, budget)
 		if err != nil {
 			return err
 		}
 		if header.compressedSize >= 0 && header.compressedSize != compressedSize {
-			return errors.New("xz block compressed size does not match its header")
+			return xzCorruptError("xz block compressed size does not match its header", nil)
 		}
 		if header.uncompressedSize >= 0 && header.uncompressedSize != uncompressedSize {
-			return errors.New("xz block uncompressed size does not match its header")
+			return xzCorruptError("xz block uncompressed size does not match its header", nil)
 		}
 
 		paddingLen := xzPadding(int64(header.length) + compressedSize)
 		padding := make([]byte, paddingLen)
 		if _, err := io.ReadFull(r, padding); err != nil {
-			return err
+			return xzCorruptError("reading xz block padding", err)
 		}
 		if !xzAllZeros(padding) {
-			return errors.New("xz block padding contains non-zero bytes")
+			return xzCorruptError("xz block padding contains non-zero bytes", nil)
 		}
 		if _, err := io.CopyN(io.Discard, r, int64(checkSize)); err != nil {
-			return err
+			return xzCorruptError("reading xz block integrity check", err)
 		}
 
 		records = append(records, xzIndexRecord{
 			unpaddedSize:     int64(header.length) + compressedSize + int64(checkSize),
 			uncompressedSize: uncompressedSize,
 		})
-		if len(records) > maxArchiveEntries {
-			return fmt.Errorf("%w: more than %d xz blocks", errArchiveLimit, maxArchiveEntries)
-		}
 	}
 }
 
 func readXZStreamHeader(r io.Reader) (flags byte, checkSize int, err error) {
 	var header [xzStreamHeaderLen]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return 0, 0, err
+		return 0, 0, xzCorruptError("invalid xz stream header", err)
 	}
 	if !bytes.Equal(header[:len(xzStreamMagic)], xzStreamMagic) {
-		return 0, 0, errors.New("invalid xz stream header")
+		return 0, 0, xzCorruptError("invalid xz stream header", nil)
 	}
 	if header[6] != 0 || crc32.ChecksumIEEE(header[6:8]) != stdbin.LittleEndian.Uint32(header[8:]) {
-		return 0, 0, errors.New("invalid xz stream flags")
+		return 0, 0, xzCorruptError("invalid xz stream flags", nil)
 	}
 	checkSize, err = xzCheckSize(header[7])
 	if err != nil {
@@ -180,45 +342,45 @@ func readXZBlockHeader(
 	header := make([]byte, headerLen)
 	header[0] = first
 	if _, err := io.ReadFull(r, header[1:]); err != nil {
-		return xzBlockHeader{}, err
+		return xzBlockHeader{}, xzCorruptError("reading xz block header", err)
 	}
 	contentEnd := headerLen - xzBlockHeaderChecksumSize
 	if crc32.ChecksumIEEE(header[:contentEnd]) != stdbin.LittleEndian.Uint32(header[contentEnd:]) {
-		return xzBlockHeader{}, errors.New("invalid xz block header checksum")
+		return xzBlockHeader{}, xzCorruptError("invalid xz block header checksum", nil)
 	}
 
 	flags := header[1]
 	if flags&xzBlockReservedFlags != 0 || flags&0x03 != 0 {
-		return xzBlockHeader{}, errors.New("unsupported xz block flags")
+		return xzBlockHeader{}, xzCorruptError("unsupported xz block flags", nil)
 	}
 	br := bytes.NewReader(header[2:contentEnd])
 	result := xzBlockHeader{length: headerLen, compressedSize: -1, uncompressedSize: -1}
 	if flags&xzBlockCompressedSizePresent != 0 {
 		size, _, err := readXZVLI(br)
 		if err != nil || size > 1<<63-1 {
-			return xzBlockHeader{}, errors.New("invalid xz block compressed size")
+			return xzBlockHeader{}, xzCorruptError("invalid xz block compressed size", err)
 		}
 		result.compressedSize = int64(size)
 	}
 	if flags&xzBlockUncompressedSizePresent != 0 {
 		size, _, err := readXZVLI(br)
 		if err != nil || size > 1<<63-1 {
-			return xzBlockHeader{}, errors.New("invalid xz block uncompressed size")
+			return xzBlockHeader{}, xzCorruptError("invalid xz block uncompressed size", err)
 		}
 		result.uncompressedSize = int64(size)
 	}
 
 	filterID, _, err := readXZVLI(br)
 	if err != nil || filterID != xzLZMA2FilterID {
-		return xzBlockHeader{}, errors.New("unsupported xz block filter")
+		return xzBlockHeader{}, xzCorruptError("unsupported xz block filter", err)
 	}
 	propertiesLen, _, err := readXZVLI(br)
 	if err != nil || propertiesLen != 1 {
-		return xzBlockHeader{}, errors.New("invalid xz LZMA2 filter properties")
+		return xzBlockHeader{}, xzCorruptError("invalid xz LZMA2 filter properties", err)
 	}
 	dictionaryCode, err := br.ReadByte()
 	if err != nil {
-		return xzBlockHeader{}, err
+		return xzBlockHeader{}, xzCorruptError("reading xz dictionary code", err)
 	}
 	dictionarySize, err := xzDictionarySize(dictionaryCode)
 	if err != nil {
@@ -229,16 +391,17 @@ func readXZBlockHeader(
 			errArchiveLimit, dictionarySize, maxDictionaryBytes)
 	}
 	if padding := header[contentEnd-br.Len() : contentEnd]; !xzAllZeros(padding) {
-		return xzBlockHeader{}, errors.New("xz block header padding contains non-zero bytes")
+		return xzBlockHeader{}, xzCorruptError("xz block header padding contains non-zero bytes", nil)
 	}
 	return result, nil
 }
 
-func scanXZLZMA2(r xzReader) (compressedSize int64, uncompressedSize int64, err error) {
+func scanXZLZMA2(r xzReader, limits ...any) (compressedSize int64, uncompressedSize int64, err error) {
+	budget := newXZResourceBudget(limits)
 	for {
 		control, err := r.ReadByte()
 		if err != nil {
-			return compressedSize, uncompressedSize, err
+			return compressedSize, uncompressedSize, xzCorruptError("reading LZMA2 control byte", err)
 		}
 		compressedSize++
 		switch {
@@ -247,18 +410,21 @@ func scanXZLZMA2(r xzReader) (compressedSize int64, uncompressedSize int64, err 
 		case control == 1 || control == 2:
 			var header [2]byte
 			if _, err := io.ReadFull(r, header[:]); err != nil {
-				return compressedSize, uncompressedSize, err
+				return compressedSize, uncompressedSize, xzCorruptError("reading uncompressed LZMA2 chunk header", err)
 			}
 			size := int64(stdbin.BigEndian.Uint16(header[:])) + 1
 			compressedSize += int64(len(header)) + size
 			uncompressedSize += size
-			if _, err := io.CopyN(io.Discard, r, size); err != nil {
+			if err := budget.addUncompressed(size); err != nil {
 				return compressedSize, uncompressedSize, err
+			}
+			if _, err := io.CopyN(io.Discard, r, size); err != nil {
+				return compressedSize, uncompressedSize, xzCorruptError("skipping uncompressed LZMA2 chunk", err)
 			}
 		case control >= xzLZMA2CompressedControl:
 			var header [4]byte
 			if _, err := io.ReadFull(r, header[:]); err != nil {
-				return compressedSize, uncompressedSize, err
+				return compressedSize, uncompressedSize, xzCorruptError("reading LZMA2 chunk header", err)
 			}
 			compressed := int64(stdbin.BigEndian.Uint16(header[2:])) + 1
 			uncompressed := int64(control&xzLZMA2UncompressedHighMask)<<xzLZMA2UncompressedHighShift |
@@ -266,21 +432,24 @@ func scanXZLZMA2(r xzReader) (compressedSize int64, uncompressedSize int64, err 
 			uncompressed++
 			compressedSize += int64(len(header)) + compressed
 			uncompressedSize += uncompressed
+			if err := budget.addUncompressed(uncompressed); err != nil {
+				return compressedSize, uncompressedSize, err
+			}
 			if control >= xzLZMA2PropertiesControl {
 				properties, err := r.ReadByte()
 				if err != nil {
-					return compressedSize, uncompressedSize, err
+					return compressedSize, uncompressedSize, xzCorruptError("reading LZMA2 properties byte", err)
 				}
 				compressedSize++
 				if properties >= xzLZMA2PropertiesCodeCount {
-					return compressedSize, uncompressedSize, errors.New("invalid LZMA2 properties")
+					return compressedSize, uncompressedSize, xzCorruptError("invalid LZMA2 properties", nil)
 				}
 			}
 			if _, err := io.CopyN(io.Discard, r, compressed); err != nil {
-				return compressedSize, uncompressedSize, err
+				return compressedSize, uncompressedSize, xzCorruptError("skipping compressed LZMA2 chunk", err)
 			}
 		default:
-			return compressedSize, uncompressedSize, errors.New("invalid LZMA2 chunk control byte")
+			return compressedSize, uncompressedSize, xzCorruptError("invalid LZMA2 chunk control byte", nil)
 		}
 	}
 }
@@ -295,7 +464,7 @@ func readXZIndex(r xzReader, expected []xzIndexRecord) (int64, error) {
 		return consumed, err
 	}
 	if recordCount != uint64(len(expected)) {
-		return consumed, errors.New("xz index block count does not match the stream")
+		return consumed, xzCorruptError("xz index block count does not match the stream", nil)
 	}
 	for _, want := range expected {
 		unpadded, count, err := readXZVLI(checked)
@@ -309,24 +478,24 @@ func readXZIndex(r xzReader, expected []xzIndexRecord) (int64, error) {
 			return consumed, err
 		}
 		if unpadded != uint64(want.unpaddedSize) || uncompressed != uint64(want.uncompressedSize) {
-			return consumed, errors.New("xz index record does not match its block")
+			return consumed, xzCorruptError("xz index record does not match its block", nil)
 		}
 	}
 
 	padding := make([]byte, xzPadding(consumed))
 	if _, err := io.ReadFull(checked, padding); err != nil {
-		return consumed, err
+		return consumed, xzCorruptError("reading xz index padding", err)
 	}
 	consumed += int64(len(padding))
 	if !xzAllZeros(padding) {
-		return consumed, errors.New("xz index padding contains non-zero bytes")
+		return consumed, xzCorruptError("xz index padding contains non-zero bytes", nil)
 	}
 	var checksum [xzIndexChecksumSize]byte
 	if _, err := io.ReadFull(r, checksum[:]); err != nil {
-		return consumed, err
+		return consumed, xzCorruptError("reading xz index checksum", err)
 	}
 	if stdbin.LittleEndian.Uint32(checksum[:]) != crc.Sum32() {
-		return consumed, errors.New("invalid xz index checksum")
+		return consumed, xzCorruptError("invalid xz index checksum", nil)
 	}
 	return consumed + int64(len(checksum)), nil
 }
@@ -334,18 +503,18 @@ func readXZIndex(r xzReader, expected []xzIndexRecord) (int64, error) {
 func readXZStreamFooter(r io.Reader, flags byte, indexSize int64) error {
 	var footer [xzStreamFooterLen]byte
 	if _, err := io.ReadFull(r, footer[:]); err != nil {
-		return err
+		return xzCorruptError("reading xz stream footer", err)
 	}
 	if !bytes.Equal(footer[10:], []byte{'Y', 'Z'}) ||
 		crc32.ChecksumIEEE(footer[4:10]) != stdbin.LittleEndian.Uint32(footer[:4]) {
-		return errors.New("invalid xz stream footer")
+		return xzCorruptError("invalid xz stream footer", nil)
 	}
 	if footer[8] != 0 || footer[9] != flags {
-		return errors.New("xz stream footer flags do not match the header")
+		return xzCorruptError("xz stream footer flags do not match the header", nil)
 	}
 	wantIndexSize := (int64(stdbin.LittleEndian.Uint32(footer[4:8])) + 1) * xzAlignment
 	if indexSize != wantIndexSize {
-		return errors.New("xz stream footer index size does not match")
+		return xzCorruptError("xz stream footer index size does not match", nil)
 	}
 	return nil
 }
@@ -375,10 +544,10 @@ func readXZVLI(r io.ByteReader) (uint64, int, error) {
 	for i, shift := 0, uint(0); ; i, shift = i+1, shift+xzVLIGroupBits {
 		b, err := r.ReadByte()
 		if err != nil {
-			return value, i, err
+			return value, i, xzCorruptError("reading XZ variable-length integer", err)
 		}
 		if i >= xzMaxVLIBytes || i == xzMaxVLIBytes-1 && b > 1 {
-			return value, i + 1, errors.New("xz VLI overflows uint64")
+			return value, i + 1, xzCorruptError("xz VLI overflows uint64", nil)
 		}
 		value |= uint64(b&xzVLIValueMask) << shift
 		if b < xzVLIContinuationBit {
@@ -389,7 +558,7 @@ func readXZVLI(r io.ByteReader) (uint64, int, error) {
 
 func xzDictionarySize(code byte) (uint64, error) {
 	if code > xzMaxDictionaryCode {
-		return 0, errors.New("invalid xz dictionary size code")
+		return 0, xzCorruptError("invalid xz dictionary size code", nil)
 	}
 	if code == xzMaxDictionaryCode {
 		return xzMaximumDictionarySize, nil
@@ -408,7 +577,7 @@ func xzCheckSize(flags byte) (int, error) {
 	case xzCheckSHA256:
 		return xzSHA256Size, nil
 	default:
-		return 0, errors.New("unsupported xz integrity check")
+		return 0, xzCorruptError("unsupported xz integrity check", nil)
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"compress/bzip2"
 	"compress/gzip"
@@ -61,6 +62,7 @@ const (
 
 var (
 	errArchiveLimit         = errors.New("archive resource limit exceeded")
+	errArchiveCorrupt       = errors.New("archive is corrupt")
 	errArchiveDuplicatePath = errors.New("archive contains duplicate file path")
 )
 
@@ -80,7 +82,7 @@ func cmdInspect(args []string) {
 
 	art, err := inspectPath(fs.Arg(0))
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		reportInspectError(fs.Arg(0), art, err, *jsonFlag, *humanFlag, *markdownFlag)
 		os.Exit(1)
 	}
 
@@ -95,6 +97,79 @@ func cmdInspect(args []string) {
 
 func enableInspectGC() {
 	debug.SetGCPercent(inspectGCPercent)
+}
+
+func reportInspectError(
+	path string,
+	art *brief.Artifact,
+	err error,
+	jsonFlag, humanFlag, markdownFlag bool,
+) {
+	kind := inspectErrorKind(err)
+	if art == nil {
+		art = newInspectErrorArtifact(path)
+	}
+	art.Status = kind
+	art.ParseStatus = kind
+	art.ErrorKind = kind
+	art.Error = err.Error()
+
+	switch {
+	case markdownFlag:
+		_, _ = fmt.Fprintf(os.Stdout, "## brief inspect failed\n\n")
+		_, _ = fmt.Fprintf(os.Stdout, "- **Status:** %s\n", kind)
+		_, _ = fmt.Fprintf(os.Stdout, "- **Error kind:** `%s`\n\n", kind)
+		_, _ = fmt.Fprintf(os.Stdout, "```text\n%v\n```\n", err)
+	case jsonFlag || (!humanFlag && !isTTY()):
+		if jsonErr := report.ArtifactJSON(os.Stdout, art); jsonErr != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "error: writing JSON error report: %v\n", jsonErr)
+		}
+	}
+
+	_, _ = fmt.Fprintf(os.Stderr, "error: %s: %v\n", kind, err)
+}
+
+func newInspectErrorArtifact(path string) *brief.Artifact {
+	art := &brief.Artifact{Version: brief.Version, Path: path}
+	f, err := os.Open(path)
+	if err != nil {
+		return art
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return art
+	}
+	head, err := sniff(f)
+	if err != nil {
+		return art
+	}
+	art.Format = head.Format
+	if art.Format == "" && isPEFile(f, info.Size()) {
+		art.Format = magic.FormatPE
+	}
+	return art
+}
+
+func inspectErrorKind(err error) string {
+	switch {
+	case err == nil:
+		return "ok"
+	case errors.Is(err, errArchiveLimit),
+		errors.Is(err, archives.ErrDecompressLimit),
+		errors.Is(err, archives.ErrEntryLimit),
+		errors.Is(err, archives.ErrEntrySizeLimit),
+		errors.Is(err, archives.ErrInputLimit),
+		errors.Is(err, archives.ErrExtractLimit):
+		return "limit_exceeded"
+	case errors.Is(err, errXZCorrupt), errors.Is(err, errArchiveCorrupt):
+		return "corrupt"
+	case errors.Is(err, errArchiveDuplicatePath):
+		return "duplicate_path"
+	default:
+		return "error"
+	}
 }
 
 // inspectPath opens path, decides whether it is a bare native object or an
@@ -259,7 +334,12 @@ func preflightArtifactArchive(f *os.File, filePath, format string, maxEntries in
 		defer zstdReader.Close()
 		return preflightTAR(zstdReader, maxEntries, maxBytes)
 	case magic.FormatXZ:
-		if err := preflightXZ(newArchiveInputLimitReader(f, maxArchiveInputBytes), maxXZDictionaryBytes); err != nil {
+		if err := preflightXZ(
+			newArchiveInputLimitReader(f, maxArchiveInputBytes),
+			maxXZDictionaryBytes,
+			maxEntries,
+			maxBytes,
+		); err != nil {
 			return err
 		}
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
@@ -267,12 +347,58 @@ func preflightArtifactArchive(f *os.File, filePath, format string, maxEntries in
 		}
 		xzReader, err := xz.NewReader(newArchiveInputLimitReader(f, maxArchiveInputBytes))
 		if err != nil {
-			return fmt.Errorf("opening xz: %w", err)
+			return xzCorruptError("opening xz stream", err)
 		}
-		return preflightTAR(xzReader, maxEntries, maxBytes)
+		return preflightXZDecompressedContent(xzReader, maxEntries, maxBytes)
 	default:
 		return nil
 	}
+}
+
+// preflightXZDecompressedContent applies TAR-specific accounting when the XZ
+// stream contains a TAR archive. A plain XZ document is already bounded by the
+// aggregate XZ preflight and is left for the compressed-file archive reader.
+func preflightXZDecompressedContent(r io.Reader, maxEntries int, maxBytes int64) error {
+	br := bufio.NewReader(r)
+	prefix, err := br.Peek(magicSniffLen)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return xzCorruptError("reading decompressed xz content", err)
+	}
+	if looksLikeTARPrefix(prefix) {
+		return preflightTAR(br, maxEntries, maxBytes)
+	}
+
+	// Plain XZ has no TAR headers for preflightTAR to drain. Decode it once
+	// through the same codec used by the consumer so block checksums and
+	// stream framing are validated before admission. The aggregate XZ budget
+	// above has already made this bounded; io.Discard avoids retaining output.
+	decodeBudget := maxBytes
+	if decodeBudget < 0 {
+		decodeBudget = 0
+	}
+	limited := io.LimitReader(br, decodeBudget+1)
+	n, err := io.Copy(io.Discard, limited)
+	if err != nil {
+		return xzCorruptError("decoding plain xz content", err)
+	}
+	if n > decodeBudget {
+		return fmt.Errorf("%w: xz expansion exceeds %d bytes", errArchiveLimit, maxBytes)
+	}
+	return nil
+}
+
+func looksLikeTARPrefix(prefix []byte) bool {
+	if len(prefix) == 0 {
+		return false
+	}
+	if magic.DetectPrefix(prefix).Format == magic.FormatTAR {
+		return true
+	}
+	if len(prefix) < 512 {
+		return false
+	}
+	_, err := tar.NewReader(bytes.NewReader(prefix)).Next()
+	return err == nil
 }
 
 func preflightTAR(r io.Reader, maxEntries int, maxBytes int64) error {
@@ -285,7 +411,10 @@ func preflightTAR(r io.Reader, maxEntries int, maxBytes int64) error {
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("reading tar: %w", err)
+			if errors.Is(err, errArchiveLimit) {
+				return err
+			}
+			return fmt.Errorf("%w: reading tar: %w", errArchiveCorrupt, err)
 		}
 		if err := checkTARHeader(header, &entries, &total, maxEntries, maxBytes); err != nil {
 			return err

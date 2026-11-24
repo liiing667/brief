@@ -21,6 +21,15 @@ type Artifact struct {
 	// input is an archive. Zero for bare native objects.
 	Entries int `json:"entries,omitempty"`
 
+	// Status, ParseStatus, and ErrorKind are omitted from successful
+	// reports. When inspection cannot produce an artifact they give
+	// machine-readable failure categories, notably "corrupt" and
+	// "limit_exceeded".
+	Status      string `json:"status,omitempty"`
+	ParseStatus string `json:"parse_status,omitempty"`
+	ErrorKind   string `json:"error_kind,omitempty"`
+	Error       string `json:"error,omitempty"`
+
 	// NativeObjects lists every ELF, Mach-O, or PE object found: the input
 	// itself when it is a bare native object, or each such entry inside an
 	// archive.
