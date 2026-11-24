@@ -848,6 +848,13 @@ func (e *Engine) scanProjectEntry(
 	}
 	if !entry.IsDir() {
 		if entry.Type().IsRegular() && e.isTracked(rel) {
+			info, err := entry.Info()
+			if err != nil || IsHardLinkedFile(info) {
+				// Hard-linked files share an inode with a name that may
+				// live outside the project root; keep them out of the
+				// index so host content never reaches the report.
+				return false
+			}
 			e.fileRoles[rel] = e.pathRoles(rel)
 			e.indexedFiles = append(e.indexedFiles, rel)
 			if !routeOnly && e.projectEvidence(rel) {

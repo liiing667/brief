@@ -203,6 +203,34 @@ func TestSafeReadManifest_RejectsSymlink(t *testing.T) {
 	}
 }
 
+func TestSafeReadManifest_RejectsHardlink(t *testing.T) {
+	real := filepath.Join(t.TempDir(), "host-package.json")
+	if err := os.WriteFile(real, []byte(`{"name": "host-package"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "package.json")
+	if err := os.Link(real, link); err != nil {
+		t.Skipf("creating hard link: %v", err)
+	}
+
+	if _, err := safeReadManifest(link); err == nil {
+		t.Fatal("expected error reading hard-linked manifest, got nil")
+	}
+}
+
+func TestNpmPackagePURL_HardlinkRejected(t *testing.T) {
+	real := t.TempDir()
+	writeFile(t, real, "package.json", `{"name": "host-package"}`)
+	dir := t.TempDir()
+	if err := os.Link(filepath.Join(real, "package.json"), filepath.Join(dir, "package.json")); err != nil {
+		t.Skipf("creating hard link: %v", err)
+	}
+
+	if got := npmPackagePURL(dir); got != "" {
+		t.Errorf("expected empty string for hard-linked package.json, got %q", got)
+	}
+}
+
 func TestSafeReadManifest_AllowsRegularFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "regular.txt")

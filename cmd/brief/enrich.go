@@ -185,11 +185,15 @@ func isSymlink(path string) bool {
 	return info.Mode()&os.ModeSymlink != 0
 }
 
-// safeReadManifest reads a manifest file, rejecting symlinks to prevent
-// file disclosure when extracted content is sent to external services.
+// safeReadManifest reads a manifest file, rejecting symlinks and hard-linked
+// files to prevent file disclosure when extracted content is sent to
+// external services.
 func safeReadManifest(path string) ([]byte, error) {
 	if isSymlink(path) {
 		return nil, fmt.Errorf("refusing to read symlink: %s", path)
+	}
+	if info, err := os.Lstat(path); err == nil && detect.IsHardLinkedFile(info) {
+		return nil, fmt.Errorf("refusing to read hard-linked file: %s", path)
 	}
 	return os.ReadFile(path)
 }

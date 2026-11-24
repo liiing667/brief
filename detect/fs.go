@@ -30,7 +30,14 @@ func (d directoryFS) Stat(name string) (fs.FileInfo, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrInvalid}
 	}
-	return os.Stat(filepath.Join(d.root, filepath.FromSlash(name)))
+	info, err := os.Stat(filepath.Join(d.root, filepath.FromSlash(name)))
+	if err != nil {
+		return nil, err
+	}
+	if IsHardLinkedFile(info) {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fmt.Errorf("hard-linked file outside scan boundary: %s", name)}
+	}
+	return info, nil
 }
 
 func (d directoryFS) Open(name string) (fs.File, error) {
@@ -53,6 +60,9 @@ func (d directoryFS) Open(name string) (fs.File, error) {
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("path is not a regular file: %s", name)
+	}
+	if IsHardLinkedFile(info) {
+		return nil, fmt.Errorf("refusing to read hard-linked file: %s", name)
 	}
 	return openNoFollow(file)
 }
@@ -87,6 +97,9 @@ func (d directoryFS) openSymlink(name, file string) (fs.File, error) {
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("path is not a regular file: %s", name)
+	}
+	if IsHardLinkedFile(info) {
+		return nil, fmt.Errorf("refusing to read hard-linked file: %s", name)
 	}
 	// Reject a symlink swapped into place after resolving the target.
 	return openNoFollow(target)
