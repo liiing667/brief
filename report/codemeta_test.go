@@ -27,7 +27,7 @@ func TestCodemetaOutput(t *testing.T) {
 	}
 	var markdown bytes.Buffer
 	Markdown(&markdown, r, true)
-	for _, want := range []string{"**CodeMeta:**", "Example \\*Software\\*", "Ada Lovelace", "&lt;script&gt;", "codemeta.json:4:9 name value\\_type: expected text"} {
+	for _, want := range []string{"**CodeMeta:**", `Example \u005c*Software\u005c*`, "Ada Lovelace", "&lt;script&gt;", `codemeta.json:4:9 name value\u005c_type: expected text`} {
 		if !strings.Contains(markdown.String(), want) {
 			t.Errorf("Markdown output missing %q: %s", want, markdown.String())
 		}

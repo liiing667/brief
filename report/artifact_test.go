@@ -118,7 +118,7 @@ func TestArtifactMarkdownEscapesMetadata(t *testing.T) {
 	}
 	var out bytes.Buffer
 	ArtifactMarkdown(&out, art)
-	want := "\\[link\\](url)\\|\\`\\*\\_&lt;script&gt; \\#\\# forged end"
+	want := `\u005c[link\u005c](url)\u005c|\u005c` + "`" + `\u005c*\u005c_&lt;script&gt;\u000a\u005c#\u005c# forged\u000d\u0009end\u202e\u2066\u2069\u200b`
 	if n := strings.Count(out.String(), want); n != 17 {
 		t.Errorf("escaped metadata occurrences = %d, want 17:\n%s", n, out.String())
 	}
@@ -127,13 +127,19 @@ func TestArtifactMarkdownEscapesMetadata(t *testing.T) {
 			t.Errorf("unescaped metadata %q: %s", unwanted, out.String())
 		}
 	}
+	if got := decodeMarkdownText(want); got != value {
+		t.Errorf("Markdown safe representation is not reversible:\n got %q\nwant %q", got, value)
+	}
 }
 
 func TestArtifactMarkdownEscapesListHeading(t *testing.T) {
 	art := &brief.Artifact{NativeObjects: []binary.Object{{Path: "lib.so", Producer: []string{"# forged"}}}}
 	var out bytes.Buffer
 	ArtifactMarkdown(&out, art)
-	if !strings.Contains(out.String(), "- \\# forged\n") {
+	if !strings.Contains(out.String(), "- \\u005c# forged\n") {
 		t.Errorf("expected escaped heading marker in list item:\n%s", out.String())
+	}
+	if !strings.Contains(decodeMarkdownText(out.String()), "# forged") {
+		t.Errorf("escaped heading does not decode back to the original value:\n%s", out.String())
 	}
 }

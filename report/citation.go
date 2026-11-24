@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"unicode"
 
 	"github.com/git-pkgs/brief"
 )
@@ -15,7 +14,7 @@ type citationRow struct{ label, value string }
 
 func printCitation(w io.Writer, info *brief.CitationInfo, verbose bool) {
 	for _, row := range citationRows(info, verbose) {
-		_, _ = fmt.Fprintf(w, "%-12s %s\n", row.label+":", row.value)
+		_, _ = fmt.Fprintf(w, "%-12s %s\n", row.label+":", safeText(row.value))
 	}
 }
 
@@ -26,7 +25,7 @@ func mdCitation(w io.Writer, info *brief.CitationInfo, verbose bool) {
 	}
 	_, _ = fmt.Fprint(w, "\n**Citation:**\n\n")
 	for _, row := range rows {
-		_, _ = fmt.Fprintf(w, "- %s: %s\n", row.label, escapeMarkdown(row.value))
+		_, _ = fmt.Fprintf(w, "- %s: %s\n", row.label, markdownSafeText(row.value))
 	}
 }
 
@@ -37,7 +36,7 @@ func citationRows(info *brief.CitationInfo, verbose bool) []citationRow {
 	var rows []citationRow
 	add := func(label, value string) {
 		if value != "" {
-			rows = append(rows, citationRow{label, citationText(value)})
+			rows = append(rows, citationRow{label, boundedText(value)})
 		}
 	}
 	title := info.Title
@@ -90,7 +89,7 @@ func citationDetailRows(info *brief.CitationInfo) []citationRow {
 	var out []citationRow
 	for _, row := range rows {
 		if row.value != "" {
-			out = append(out, citationRow{row.label, citationText(row.value)})
+			out = append(out, citationRow{row.label, boundedText(row.value)})
 		}
 	}
 	return out
@@ -122,20 +121,17 @@ func citationAuthorName(author brief.CitationAuthor) string {
 	return strings.Join(parts, " ")
 }
 
-func citationText(value string) string {
+// boundedText caps long repo-controlled values while keeping the value
+// intact and reversible: the continuation marker is itself a \uXXXX escape
+// of the horizontal ellipsis, so decodeText can locate and remove it before
+// recovering the original characters.
+func boundedText(value string) string {
 	const maxRunes = 300
-	value = strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return ' '
-		}
-		if unicode.Is(unicode.Cf, r) {
-			return -1
-		}
-		return r
-	}, sanitizeLine(value))
 	runes := []rune(value)
 	if len(runes) > maxRunes {
-		return string(runes[:maxRunes]) + "..."
+		return string(runes[:maxRunes]) + truncationMarker
 	}
 	return value
 }
+
+const truncationMarker = `\u2026`

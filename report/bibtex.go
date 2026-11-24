@@ -10,7 +10,7 @@ import (
 
 func printBibTeX(w io.Writer, info *brief.BibTeXInfo, verbose bool) {
 	for _, row := range bibtexRows(info, verbose) {
-		_, _ = fmt.Fprintf(w, "%-12s %s\n", row.label+":", row.value)
+		_, _ = fmt.Fprintf(w, "%-12s %s\n", row.label+":", safeText(row.value))
 	}
 }
 
@@ -21,7 +21,7 @@ func mdBibTeX(w io.Writer, info *brief.BibTeXInfo, verbose bool) {
 	}
 	_, _ = fmt.Fprint(w, "\n**BibTeX:**\n\n")
 	for _, row := range rows {
-		_, _ = fmt.Fprintf(w, "- %s: %s\n", row.label, escapeMarkdown(row.value))
+		_, _ = fmt.Fprintf(w, "- %s: %s\n", row.label, markdownSafeText(row.value))
 	}
 }
 
@@ -34,7 +34,7 @@ func bibtexRows(info *brief.BibTeXInfo, verbose bool) []citationRow {
 	var rows []citationRow
 	add := func(label, value string) {
 		if value != "" {
-			rows = append(rows, citationRow{label, citationText(value)})
+			rows = append(rows, citationRow{label, boundedText(value)})
 		}
 	}
 	summary := info.Path + " " + info.ParseStatus

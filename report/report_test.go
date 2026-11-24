@@ -156,12 +156,40 @@ func TestSanitize(t *testing.T) {
 	}{
 		{"hello", "hello"},
 		{"hello\tworld", "hello\tworld"},
-		{"hello\x1b[31mred\x1b[0m", "hello[31mred[0m"},
+		{"hello\x1b[31mred\x1b[0m", `hello\u001b[31mred\u001b[0m`},
 		{"line\nbreak", "line\nbreak"},
+		{"Björk 北京", "Björk 北京"},
+		{`back\slash`, `back\u005cslash`},
 	}
 	for _, tt := range tests {
 		if got := sanitize(tt.input); got != tt.want {
 			t.Errorf("sanitize(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestSafeTextRoundTrip(t *testing.T) {
+	values := []string{
+		"", "plain", "Björk 北京 — naïve",
+		"a\tb\nc\rd\x00e",
+		"escape\x1b[31mred\x1b[0m",
+		"bidi\u202esecret\u202czero\u200bwidth\u2066\u2069",
+		"nbsp\u00a0end", "back\\slash",
+		"newline\vformfeed\fbel\x07",
+		"emoji 😀 and tab\t",
+	}
+	for _, v := range values {
+		if got := decodeText(safeText(v)); got != v {
+			t.Errorf("safeText round trip failed for %q: got %q", v, got)
+		}
+		if got := decodeText(safeMultiline(v)); got != v {
+			t.Errorf("safeMultiline round trip failed for %q: got %q", v, got)
+		}
+		encoded := safeText(v)
+		for _, r := range encoded {
+			if r != '\n' && ((r < 0x20 || r == 0x7f) || (r >= 0x80 && r <= 0x9f)) {
+				t.Fatalf("safeText(%q) leaves raw control rune %q in %q", v, r, encoded)
+			}
 		}
 	}
 }
@@ -238,8 +266,11 @@ func TestHumanSanitizesCIMatrix(t *testing.T) {
 	if strings.Contains(out, "\x07") {
 		t.Errorf("output contains BEL byte\ngot:\n%q", out)
 	}
-	if !strings.Contains(out, "[31mRED[0m") {
-		t.Errorf("expected sanitized version string\ngot:\n%s", out)
+	if !strings.Contains(out, `\u001b[31mRED\u001b[0m`) {
+		t.Errorf("expected reversible escape of version string\ngot:\n%s", out)
+	}
+	if !strings.Contains(out, `\u001b]0;PWNED\u0007-ubuntu`) {
+		t.Errorf("expected reversible escape of OSC sequence\ngot:\n%s", out)
 	}
 }
 
@@ -312,8 +343,11 @@ func TestHumanSanitizesResources(t *testing.T) {
 	if strings.Contains(out, "\x1b") {
 		t.Errorf("output contains ESC byte\ngot:\n%q", out)
 	}
-	if !strings.Contains(out, "README[31mRED[0m.md") {
-		t.Errorf("expected sanitized resource path\ngot:\n%s", out)
+	if !strings.Contains(out, `README\u001b[31mRED\u001b[0m.md`) {
+		t.Errorf("expected reversible resource path escape\ngot:\n%s", out)
+	}
+	if !strings.Contains(out, `CONTRIBUTING\u001b[31m.md`) {
+		t.Errorf("expected reversible community path escape\ngot:\n%s", out)
 	}
 }
 

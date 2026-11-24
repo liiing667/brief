@@ -4,21 +4,20 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"unicode"
 
 	"github.com/git-pkgs/brief"
 )
 
 // Markdown writes the report in markdown format.
 func Markdown(w io.Writer, r *brief.Report, verbose bool) {
-	_, _ = fmt.Fprintf(w, "# brief %s — %s\n\n", r.Version, sanitize(r.Path))
+	_, _ = fmt.Fprintf(w, "# brief %s — %s\n\n", markdownSafeText(r.Version), markdownSafeText(r.Path))
 
 	if r.DiffRef != "" {
-		_, _ = fmt.Fprintf(w, "diff %s (%d files changed)\n\n", r.DiffRef, len(r.ChangedFiles))
+		_, _ = fmt.Fprintf(w, "diff %s (%d files changed)\n\n", markdownSafeText(r.DiffRef), len(r.ChangedFiles))
 	}
 
-	mdTruncatedList(w, "Commits", r.DiffCommits)
-	mdTruncatedList(w, "Changed", r.ChangedFiles)
+	mdSafeTruncatedList(w, "Commits", r.DiffCommits)
+	mdSafeTruncatedList(w, "Changed", r.ChangedFiles)
 	mdLanguages(w, r.Languages)
 	mdPackageManagers(w, r.PackageManagers)
 	mdDependencySummary(w, r.Dependencies)
@@ -50,12 +49,25 @@ func mdTruncatedList(w io.Writer, header string, items []string) {
 	_, _ = fmt.Fprintf(w, "**%s:**\n\n", header)
 	limit := min(len(items), maxDisplayItems)
 	for _, item := range items[:limit] {
-		_, _ = fmt.Fprintf(w, "- %s\n", sanitize(item))
+		_, _ = fmt.Fprintf(w, "- %s\n", item)
 	}
 	if len(items) > maxDisplayItems {
 		_, _ = fmt.Fprintf(w, "- ... and %d more\n", len(items)-maxDisplayItems)
 	}
 	_, _ = fmt.Fprintln(w)
+}
+
+// mdSafeTruncatedList renders repo-controlled items through the shared safe
+// representation before handing them to mdTruncatedList.
+func mdSafeTruncatedList(w io.Writer, header string, items []string) {
+	if len(items) == 0 {
+		return
+	}
+	safe := make([]string, len(items))
+	for i, item := range items {
+		safe[i] = markdownSafeText(item)
+	}
+	mdTruncatedList(w, header, safe)
 }
 
 func mdLanguages(w io.Writer, languages []brief.Detection) {
@@ -64,21 +76,21 @@ func mdLanguages(w io.Writer, languages []brief.Detection) {
 	}
 	names := detectionNames(languages)
 	if len(names) == 1 {
-		_, _ = fmt.Fprintf(w, "**Language:** %s\n", names[0])
+		_, _ = fmt.Fprintf(w, "**Language:** %s\n", markdownSafeText(names[0]))
 	} else {
-		_, _ = fmt.Fprintf(w, "**Language:** %s (also: %s)\n", names[0], strings.Join(names[1:], ", "))
+		_, _ = fmt.Fprintf(w, "**Language:** %s (also: %s)\n", markdownSafeText(names[0]), markdownSafeText(strings.Join(names[1:], ", ")))
 	}
 }
 
 func mdPackageManagers(w io.Writer, managers []brief.Detection) {
 	for _, pm := range managers {
-		line := pm.Name
+		line := markdownSafeText(pm.Name)
 		if pm.Command != nil {
-			line += " (`" + pm.Command.Run + "`)"
+			line += " (" + markdownCode(pm.Command.Run) + ")"
 		}
 		_, _ = fmt.Fprintf(w, "**Package Manager:** %s\n", line)
 		if pm.Lockfile != "" {
-			_, _ = fmt.Fprintf(w, "Lockfile: %s\n", pm.Lockfile)
+			_, _ = fmt.Fprintf(w, "Lockfile: %s\n", markdownSafeText(pm.Lockfile))
 		}
 	}
 }
@@ -95,17 +107,17 @@ func mdScripts(w io.Writer, scripts []brief.Script) {
 	}
 	_, _ = fmt.Fprintln(w)
 	source := scripts[0].Source
-	_, _ = fmt.Fprintf(w, "## Scripts (%s)\n\n", source)
+	_, _ = fmt.Fprintf(w, "## Scripts (%s)\n\n", markdownSafeText(source))
 	_, _ = fmt.Fprintln(w, "| Name | Command |")
 	_, _ = fmt.Fprintln(w, "|------|---------|")
 	for _, s := range scripts {
 		if s.Source != source {
-			_, _ = fmt.Fprintf(w, "\n## Scripts (%s)\n\n", s.Source)
+			_, _ = fmt.Fprintf(w, "\n## Scripts (%s)\n\n", markdownSafeText(s.Source))
 			_, _ = fmt.Fprintln(w, "| Name | Command |")
 			_, _ = fmt.Fprintln(w, "|------|---------|")
 			source = s.Source
 		}
-		_, _ = fmt.Fprintf(w, "| %s | `%s` |\n", sanitize(s.Name), sanitize(s.Run))
+		_, _ = fmt.Fprintf(w, "| %s | %s |\n", markdownSafeText(s.Name), markdownCode(s.Run))
 	}
 	_, _ = fmt.Fprintln(w)
 }
@@ -159,13 +171,13 @@ func mdToolRows(w io.Writer, label string, dets []brief.Detection) {
 	for _, t := range dets {
 		cmd := ""
 		if t.Command != nil {
-			cmd = "`" + sanitize(t.Command.Run) + "`"
+			cmd = markdownCode(t.Command.Run)
 		}
 		config := ""
 		if len(t.ConfigFiles) > 0 {
-			config = sanitize(strings.Join(t.ConfigFiles, ", "))
+			config = markdownSafeText(strings.Join(t.ConfigFiles, ", "))
 		}
-		_, _ = fmt.Fprintf(w, "| %s | %s | %s | %s |\n", label, t.Name, cmd, config)
+		_, _ = fmt.Fprintf(w, "| %s | %s | %s | %s |\n", markdownSafeText(label), markdownSafeText(t.Name), cmd, config)
 	}
 }
 
@@ -180,12 +192,12 @@ func mdToolLinks(w io.Writer, tools map[string][]brief.Detection) {
 			if t.Homepage == "" && t.Docs == "" {
 				continue
 			}
-			_, _ = fmt.Fprintf(w, "**%s:**", t.Name)
+			_, _ = fmt.Fprintf(w, "**%s:**", markdownSafeText(t.Name))
 			if t.Homepage != "" {
-				_, _ = fmt.Fprintf(w, " [homepage](%s)", t.Homepage)
+				_, _ = fmt.Fprintf(w, " [homepage](%s)", linkTarget(t.Homepage))
 			}
 			if t.Docs != "" {
-				_, _ = fmt.Fprintf(w, " [docs](%s)", t.Docs)
+				_, _ = fmt.Fprintf(w, " [docs](%s)", linkTarget(t.Docs))
 			}
 			_, _ = fmt.Fprintln(w)
 		}
@@ -215,7 +227,7 @@ func mdStyle(w io.Writer, style *brief.StyleInfo) {
 		}
 	}
 	if len(parts) > 0 {
-		_, _ = fmt.Fprintf(w, "**Style:** %s\n", strings.Join(parts, " | "))
+		_, _ = fmt.Fprintf(w, "**Style:** %s\n", markdownSafeText(strings.Join(parts, " | ")))
 	}
 }
 
@@ -231,7 +243,7 @@ func mdLayout(w io.Writer, layout *brief.LayoutInfo) {
 		parts = append(parts, "test: "+joinDirs(layout.TestDirs))
 	}
 	if len(parts) > 0 {
-		_, _ = fmt.Fprintf(w, "**Layout:** %s\n", strings.Join(parts, " | "))
+		_, _ = fmt.Fprintf(w, "**Layout:** %s\n", markdownSafeText(strings.Join(parts, " | ")))
 	}
 }
 
@@ -241,13 +253,13 @@ func mdPlatforms(w io.Writer, platforms *brief.PlatformInfo) {
 	}
 	_, _ = fmt.Fprintln(w)
 	for _, name := range sortedKeys(platforms.CIMatrixVersions) {
-		_, _ = fmt.Fprintf(w, "**Platforms:** %s %s (CI matrix)\n", name, sanitize(strings.Join(platforms.CIMatrixVersions[name], ", ")))
+		_, _ = fmt.Fprintf(w, "**Platforms:** %s %s (CI matrix)\n", name, markdownSafeText(strings.Join(platforms.CIMatrixVersions[name], ", ")))
 	}
 	for _, file := range sortedKeys(platforms.RuntimeVersionFiles) {
-		_, _ = fmt.Fprintf(w, "- %s: %s\n", sanitize(file), sanitize(platforms.RuntimeVersionFiles[file]))
+		_, _ = fmt.Fprintf(w, "- %s: %s\n", markdownSafeText(file), markdownSafeText(platforms.RuntimeVersionFiles[file]))
 	}
 	if len(platforms.CIMatrixOS) > 0 {
-		_, _ = fmt.Fprintf(w, "- OS: %s (CI matrix)\n", sanitize(strings.Join(platforms.CIMatrixOS, ", ")))
+		_, _ = fmt.Fprintf(w, "- OS: %s (CI matrix)\n", markdownSafeText(strings.Join(platforms.CIMatrixOS, ", ")))
 	}
 }
 
@@ -265,7 +277,7 @@ func mdResources(w io.Writer, res *brief.ResourceInfo) {
 		if res.LicenseType != "" {
 			label += " (" + res.LicenseType + ")"
 		}
-		_, _ = fmt.Fprintf(w, "- %s\n", label)
+		_, _ = fmt.Fprintf(w, "- %s\n", markdownSafeText(label))
 	}
 	mdResourceGroup(w, "Legal", res.Legal)
 	mdResourceGroup(w, "Community", res.Community)
@@ -281,19 +293,19 @@ func mdTemplates(w io.Writer, t *brief.TemplateInfo) {
 	}
 	_, _ = fmt.Fprintln(w, "- Templates:")
 	for _, p := range t.Issue {
-		_, _ = fmt.Fprintf(w, "  - issue: %s\n", sanitize(p))
+		_, _ = fmt.Fprintf(w, "  - issue: %s\n", markdownSafeText(p))
 	}
 	for _, p := range t.PullRequest {
-		_, _ = fmt.Fprintf(w, "  - pull request: %s\n", sanitize(p))
+		_, _ = fmt.Fprintf(w, "  - pull request: %s\n", markdownSafeText(p))
 	}
 	if t.Config != "" {
-		_, _ = fmt.Fprintf(w, "  - config: %s\n", sanitize(t.Config))
+		_, _ = fmt.Fprintf(w, "  - config: %s\n", markdownSafeText(t.Config))
 	}
 }
 
 func mdResource(w io.Writer, path string) {
 	if path != "" {
-		_, _ = fmt.Fprintf(w, "- %s\n", sanitize(path))
+		_, _ = fmt.Fprintf(w, "- %s\n", markdownSafeText(path))
 	}
 }
 
@@ -303,7 +315,7 @@ func mdResourceGroup(w io.Writer, label string, group map[string]string) {
 	}
 	_, _ = fmt.Fprintf(w, "- %s:\n", label)
 	for _, k := range sortedKeys(group) {
-		_, _ = fmt.Fprintf(w, "  - %s\n", sanitize(group[k]))
+		_, _ = fmt.Fprintf(w, "  - %s\n", markdownSafeText(group[k]))
 	}
 }
 
@@ -318,7 +330,7 @@ func mdSkills(w io.Writer, skills []brief.Skill) {
 		if s.Description != "" {
 			line += " — " + s.Description
 		}
-		_, _ = fmt.Fprintf(w, "- %s `%s`\n", sanitize(line), sanitize(s.Path))
+		_, _ = fmt.Fprintf(w, "- %s %s\n", markdownSafeText(line), markdownCode(s.Path))
 	}
 }
 
@@ -328,9 +340,9 @@ func mdGit(w io.Writer, git *brief.GitInfo) {
 	}
 	_, _ = fmt.Fprintln(w)
 	if git.Branch != "" {
-		_, _ = fmt.Fprintf(w, "**Git:** branch `%s`", sanitize(git.Branch))
+		_, _ = fmt.Fprintf(w, "**Git:** branch %s", markdownCode(git.Branch))
 		if git.DefaultBranch != "" && git.DefaultBranch != git.Branch {
-			_, _ = fmt.Fprintf(w, " (default: `%s`)", sanitize(git.DefaultBranch))
+			_, _ = fmt.Fprintf(w, " (default: %s)", markdownCode(git.DefaultBranch))
 		}
 		if git.CommitCount > 0 {
 			_, _ = fmt.Fprintf(w, " — %d commits", git.CommitCount)
@@ -338,7 +350,7 @@ func mdGit(w io.Writer, git *brief.GitInfo) {
 		_, _ = fmt.Fprintln(w)
 	}
 	for _, name := range sortedKeys(git.Remotes) {
-		_, _ = fmt.Fprintf(w, "- %s: %s\n", sanitize(name), sanitize(git.Remotes[name]))
+		_, _ = fmt.Fprintf(w, "- %s: %s\n", markdownSafeText(name), markdownSafeText(git.Remotes[name]))
 	}
 }
 
@@ -347,7 +359,7 @@ func mdLines(w io.Writer, lines *brief.LineCount) {
 		return
 	}
 	_, _ = fmt.Fprintf(w, "\n**Lines:** %d code, %d files (%s)\n",
-		lines.TotalLines, lines.TotalFiles, lines.Source)
+		lines.TotalLines, lines.TotalFiles, markdownSafeText(lines.Source))
 }
 
 func mdEnrichment(w io.Writer, e *brief.EnrichmentInfo) {
@@ -355,18 +367,18 @@ func mdEnrichment(w io.Writer, e *brief.EnrichmentInfo) {
 		return
 	}
 	if e.Repo != nil && e.Repo.Scorecard > 0 {
-		_, _ = fmt.Fprintf(w, "\n**Scorecard:** %.1f/10 (%s)\n", e.Repo.Scorecard, e.Repo.ScorecardDate)
+		_, _ = fmt.Fprintf(w, "\n**Scorecard:** %.1f/10 (%s)\n", e.Repo.Scorecard, markdownSafeText(e.Repo.ScorecardDate))
 	}
 	if len(e.RuntimeEOL) > 0 {
 		_, _ = fmt.Fprintln(w)
 		for name, eol := range e.RuntimeEOL {
-			_, _ = fmt.Fprintf(w, "**Runtime:** %s\n", enrichmentRuntimeLine(name, eol))
+			_, _ = fmt.Fprintf(w, "**Runtime:** %s\n", markdownSafeText(enrichmentRuntimeLine(name, eol)))
 		}
 	}
 	for _, pkg := range e.Packages {
-		_, _ = fmt.Fprintf(w, "\n**Published:** %s (%s)\n", pkg.Name, pkg.Ecosystem)
+		_, _ = fmt.Fprintf(w, "\n**Published:** %s (%s)\n", markdownSafeText(pkg.Name), markdownSafeText(pkg.Ecosystem))
 		for _, line := range packageDetailLines(pkg) {
-			_, _ = fmt.Fprintf(w, "- %s\n", line)
+			_, _ = fmt.Fprintf(w, "- %s\n", markdownSafeText(line))
 		}
 	}
 }
@@ -378,7 +390,7 @@ func MissingMarkdown(w io.Writer, r *brief.MissingReport) {
 		return
 	}
 
-	_, _ = fmt.Fprintf(w, "**Detected:** %s\n\n", strings.Join(r.Ecosystems, ", "))
+	_, _ = fmt.Fprintf(w, "**Detected:** %s\n\n", markdownSafeText(strings.Join(r.Ecosystems, ", ")))
 	_, _ = fmt.Fprintf(w, "## Missing recommended tooling\n\n")
 	_, _ = fmt.Fprintln(w, "| Category | Suggested | Command | Docs |")
 	_, _ = fmt.Fprintln(w, "|----------|-----------|---------|------|")
@@ -386,24 +398,24 @@ func MissingMarkdown(w io.Writer, r *brief.MissingReport) {
 	for _, m := range r.Missing {
 		suggested := ""
 		if m.Suggested != "" {
-			suggested = m.Suggested
+			suggested = markdownSafeText(m.Suggested)
 		}
 		cmd := ""
 		if m.SuggestedCmd != "" {
-			cmd = "`" + sanitize(m.SuggestedCmd) + "`"
+			cmd = markdownCode(m.SuggestedCmd)
 		}
 		docs := ""
 		if m.Docs != "" {
-			docs = sanitize(m.Docs)
+			docs = markdownSafeText(m.Docs)
 		}
-		_, _ = fmt.Fprintf(w, "| %s | %s | %s | %s |\n", m.Label, suggested, cmd, docs)
+		_, _ = fmt.Fprintf(w, "| %s | %s | %s | %s |\n", markdownSafeText(m.Label), suggested, cmd, docs)
 	}
 }
 
 // ThreatMarkdown writes the threat report in markdown format.
 func ThreatMarkdown(w io.Writer, r *brief.ThreatReport) {
 	if len(r.Ecosystems) > 0 {
-		_, _ = fmt.Fprintf(w, "**Detected:** %s\n\n", strings.Join(r.Ecosystems, ", "))
+		_, _ = fmt.Fprintf(w, "**Detected:** %s\n\n", markdownSafeText(strings.Join(r.Ecosystems, ", ")))
 	}
 
 	if len(r.Threats) == 0 {
@@ -415,7 +427,8 @@ func ThreatMarkdown(w io.Writer, r *brief.ThreatReport) {
 	_, _ = fmt.Fprintln(w, "|--------|-----|-------|---------------|")
 	for _, t := range r.Threats {
 		_, _ = fmt.Fprintf(w, "| %s | %s | %s | %s |\n",
-			t.Title, t.CWE, t.OWASP, strings.Join(t.IntroducedBy, ", "))
+			markdownSafeText(t.Title), markdownSafeText(t.CWE), markdownSafeText(t.OWASP),
+			markdownSafeText(strings.Join(t.IntroducedBy, ", ")))
 	}
 }
 
@@ -429,21 +442,14 @@ func SinksMarkdown(w io.Writer, r *brief.SinkReport) {
 	_, _ = fmt.Fprintln(w, "| Tool | Symbol | Threat | CWE |")
 	_, _ = fmt.Fprintln(w, "|------|--------|--------|-----|")
 	for _, s := range r.Sinks {
-		_, _ = fmt.Fprintf(w, "| %s | `%s` | %s | %s |\n", s.Tool, s.Symbol, s.Threat, s.CWE)
+		_, _ = fmt.Fprintf(w, "| %s | %s | %s | %s |\n",
+			markdownSafeText(s.Tool), markdownCode(s.Symbol), markdownSafeText(s.Threat), markdownSafeText(s.CWE))
 	}
 }
 
 // ArtifactMarkdown writes the artifact report in Markdown format.
 func ArtifactMarkdown(w io.Writer, a *brief.Artifact) {
-	text := func(value string) string {
-		value = strings.Map(func(r rune) rune {
-			if unicode.Is(unicode.Cf, r) {
-				return -1
-			}
-			return r
-		}, sanitizeLine(value))
-		return strings.ReplaceAll(escapeMarkdown(value), "#", `\#`)
-	}
+	text := markdownSafeText
 	list := func(header string, values []string) {
 		items := make([]string, len(values))
 		for i, value := range values {
@@ -486,11 +492,4 @@ func ArtifactMarkdown(w io.Writer, a *brief.Artifact) {
 		}
 	}
 	_, _ = fmt.Fprintf(w, "---\n\n%.1fms\n", a.DurationMS)
-}
-
-func escapeMarkdown(value string) string {
-	return strings.NewReplacer(
-		"\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]",
-		"<", "&lt;", ">", "&gt;", "&", "&amp;", "|", "\\|",
-	).Replace(value)
 }

@@ -129,7 +129,7 @@ func TestMarkdownStyle(t *testing.T) {
 	Markdown(&buf, r, false)
 	out := buf.String()
 
-	if !strings.Contains(out, "**Style:** tabs (.editorconfig) | LF | trailing newline") {
+	if !strings.Contains(out, `**Style:** tabs (.editorconfig) \u005c| LF \u005c| trailing newline`) {
 		t.Errorf("style output wrong\ngot:\n%s", out)
 	}
 }
@@ -216,9 +216,9 @@ func TestMarkdownTemplates(t *testing.T) {
 	out := buf.String()
 
 	want := "- Templates:\n" +
-		"  - issue: .github/ISSUE_TEMPLATE/bug.md\n" +
-		"  - pull request: .github/PULL_REQUEST_TEMPLATE.md\n" +
-		"  - config: .github/ISSUE_TEMPLATE/config.yml\n"
+		"  - issue: .github/ISSUE\\u005c_TEMPLATE/bug.md\n" +
+		"  - pull request: .github/PULL\\u005c_REQUEST\\u005c_TEMPLATE.md\n" +
+		"  - config: .github/ISSUE\\u005c_TEMPLATE/config.yml\n"
 	if !strings.Contains(out, want) {
 		t.Errorf("missing templates section\ngot:\n%s", out)
 	}
@@ -425,7 +425,7 @@ func TestSinksMarkdown(t *testing.T) {
 
 	checks := []string{
 		"| Tool | Symbol | Threat | CWE |",
-		"| Ruby | `eval` | code_injection | CWE-95 |",
+		"| Ruby | `eval` | code\\u005c_injection | CWE-95 |",
 	}
 	for _, want := range checks {
 		if !strings.Contains(out, want) {

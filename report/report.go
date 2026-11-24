@@ -7,37 +7,21 @@ import (
 	"io"
 	"sort"
 	"strings"
-	"unicode"
 
 	"github.com/git-pkgs/brief"
 )
 
-// sanitize strips control characters (ANSI escapes, OSC sequences, etc.)
-// from repo-controlled strings before printing to a terminal.
+// sanitize renders repo-controlled strings in the shared reversible safe
+// representation, preserving intentional newlines and tabs (see safetext.go).
 func sanitize(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '\t' || r == '\n' {
-			return r
-		}
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, s)
+	return safeMultiline(s)
 }
 
-// sanitizeLine strips terminal control characters and replaces line-breaking
-// whitespace so untrusted values cannot add fields to line-oriented output.
+// sanitizeLine renders a repo-controlled string as one safe line, so
+// untrusted values cannot add fields to line-oriented output. The encoding is
+// reversible with decodeText instead of silently dropping characters.
 func sanitizeLine(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\t' {
-			return ' '
-		}
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, s)
+	return safeText(s)
 }
 
 // diagnosticLocation renders a diagnostic's source position, its field path,
@@ -93,7 +77,7 @@ var CategoryLabels = map[string]string{
 
 // Human writes the report in human-readable format.
 func Human(w io.Writer, r *brief.Report, verbose bool) {
-	_, _ = fmt.Fprintf(w, "brief %s — %s\n", r.Version, sanitize(r.Path))
+	_, _ = fmt.Fprintf(w, "brief %s — %s\n", sanitize(r.Version), sanitize(r.Path))
 
 	if r.DiffRef != "" {
 		_, _ = fmt.Fprintf(w, "diff %s  (%d files changed)\n", r.DiffRef, len(r.ChangedFiles))
@@ -158,21 +142,21 @@ func printLanguages(w io.Writer, languages []brief.Detection) {
 	}
 	names := detectionNames(languages)
 	if len(names) == 1 {
-		_, _ = fmt.Fprintf(w, "Language:        %s\n", names[0])
+		_, _ = fmt.Fprintf(w, "Language:        %s\n", sanitize(names[0]))
 	} else {
-		_, _ = fmt.Fprintf(w, "Language:        %s (also: %s)\n", names[0], strings.Join(names[1:], ", "))
+		_, _ = fmt.Fprintf(w, "Language:        %s (also: %s)\n", sanitize(names[0]), sanitize(strings.Join(names[1:], ", ")))
 	}
 }
 
 func printPackageManagers(w io.Writer, managers []brief.Detection) {
 	for _, pm := range managers {
-		line := pm.Name
+		line := sanitize(pm.Name)
 		if pm.Command != nil {
-			line += " (" + pm.Command.Run + ")"
+			line += " (" + sanitize(pm.Command.Run) + ")"
 		}
 		_, _ = fmt.Fprintf(w, "Package Manager: %s\n", line)
 		if pm.Lockfile != "" {
-			_, _ = fmt.Fprintf(w, "                 Lockfile: %s\n", pm.Lockfile)
+			_, _ = fmt.Fprintf(w, "                 Lockfile: %s\n", sanitize(pm.Lockfile))
 		}
 	}
 }
@@ -189,10 +173,10 @@ func printScripts(w io.Writer, scripts []brief.Script) {
 	}
 	_, _ = fmt.Fprintln(w)
 	source := scripts[0].Source
-	_, _ = fmt.Fprintf(w, "Scripts (%s):\n", source)
+	_, _ = fmt.Fprintf(w, "Scripts (%s):\n", sanitize(source))
 	for _, s := range scripts {
 		if s.Source != source {
-			_, _ = fmt.Fprintf(w, "\nScripts (%s):\n", s.Source)
+			_, _ = fmt.Fprintf(w, "\nScripts (%s):\n", sanitize(s.Source))
 			source = s.Source
 		}
 		_, _ = fmt.Fprintf(w, "  %-8s %s\n", sanitize(s.Name)+":", sanitize(s.Run))
@@ -221,9 +205,9 @@ func printTools(w io.Writer, tools map[string][]brief.Detection, verbose bool) {
 		for _, t := range dets {
 			line := t.Name
 			if t.Command != nil {
-				line += " (" + t.Command.Run + ")"
+				line += " (" + sanitize(t.Command.Run) + ")"
 			}
-			_, _ = fmt.Fprintf(w, "%-13s%s\n", cat+":", line)
+			_, _ = fmt.Fprintf(w, "%-13s%s\n", cat+":", sanitize(line))
 		}
 	}
 }
@@ -234,7 +218,7 @@ func printToolCategory(w io.Writer, label string, tools []brief.Detection, verbo
 		if i > 0 {
 			prefix = ""
 		}
-		line := t.Name
+		line := sanitize(t.Name)
 		if t.Command != nil {
 			line += " (" + sanitize(t.Command.Run) + ")"
 		}
@@ -245,10 +229,10 @@ func printToolCategory(w io.Writer, label string, tools []brief.Detection, verbo
 
 		if verbose {
 			if t.Homepage != "" {
-				_, _ = fmt.Fprintf(w, "              homepage: %s\n", t.Homepage)
+				_, _ = fmt.Fprintf(w, "              homepage: %s\n", sanitizeLine(t.Homepage))
 			}
 			if t.Docs != "" {
-				_, _ = fmt.Fprintf(w, "              docs:     %s\n", t.Docs)
+				_, _ = fmt.Fprintf(w, "              docs:     %s\n", sanitizeLine(t.Docs))
 			}
 		}
 	}
@@ -261,14 +245,14 @@ func printStyle(w io.Writer, style *brief.StyleInfo) {
 	_, _ = fmt.Fprintln(w)
 	var parts []string
 	if style.Indentation != "" {
-		s := style.Indentation
+		s := sanitize(style.Indentation)
 		if style.IndentSource != "" {
-			s += " (" + style.IndentSource + ")"
+			s += " (" + sanitize(style.IndentSource) + ")"
 		}
 		parts = append(parts, s)
 	}
 	if style.LineEnding != "" {
-		parts = append(parts, style.LineEnding)
+		parts = append(parts, sanitize(style.LineEnding))
 	}
 	if style.TrailingNewline != nil {
 		if *style.TrailingNewline {
@@ -288,10 +272,10 @@ func printLayout(w io.Writer, layout *brief.LayoutInfo) {
 	}
 	var parts []string
 	if len(layout.SourceDirs) > 0 {
-		parts = append(parts, "source: "+joinDirs(layout.SourceDirs))
+		parts = append(parts, "source: "+sanitize(joinDirs(layout.SourceDirs)))
 	}
 	if len(layout.TestDirs) > 0 {
-		parts = append(parts, "test: "+joinDirs(layout.TestDirs))
+		parts = append(parts, "test: "+sanitize(joinDirs(layout.TestDirs)))
 	}
 	if len(parts) > 0 {
 		_, _ = fmt.Fprintf(w, "Layout:      %s\n", strings.Join(parts, "  "))
@@ -332,9 +316,9 @@ func printResources(w io.Writer, res *brief.ResourceInfo) {
 	printResource(w, res.Changelog)
 	printResource(w, res.Roadmap)
 	if res.License != "" {
-		label := res.License
+		label := sanitize(res.License)
 		if res.LicenseType != "" {
-			label += " (" + res.LicenseType + ")"
+			label += " (" + sanitize(res.LicenseType) + ")"
 		}
 		_, _ = fmt.Fprintf(w, "Resources:   %s\n", label)
 	}
@@ -406,7 +390,7 @@ func printLines(w io.Writer, lines *brief.LineCount) {
 		return
 	}
 	_, _ = fmt.Fprintf(w, "\nLines:       %d code  %d files (%s)\n",
-		lines.TotalLines, lines.TotalFiles, lines.Source)
+		lines.TotalLines, lines.TotalFiles, sanitizeLine(lines.Source))
 }
 
 func printEnrichment(w io.Writer, e *brief.EnrichmentInfo) {
@@ -414,18 +398,18 @@ func printEnrichment(w io.Writer, e *brief.EnrichmentInfo) {
 		return
 	}
 	if e.Repo != nil && e.Repo.Scorecard > 0 {
-		_, _ = fmt.Fprintf(w, "\nScorecard:   %.1f/10 (%s)\n", e.Repo.Scorecard, e.Repo.ScorecardDate)
+		_, _ = fmt.Fprintf(w, "\nScorecard:   %.1f/10 (%s)\n", e.Repo.Scorecard, sanitizeLine(e.Repo.ScorecardDate))
 	}
 	if len(e.RuntimeEOL) > 0 {
 		_, _ = fmt.Fprintln(w)
 		for name, eol := range e.RuntimeEOL {
-			_, _ = fmt.Fprintf(w, "Runtime:     %s\n", enrichmentRuntimeLine(name, eol))
+			_, _ = fmt.Fprintf(w, "Runtime:     %s\n", sanitizeLine(enrichmentRuntimeLine(name, eol)))
 		}
 	}
 	for _, pkg := range e.Packages {
-		_, _ = fmt.Fprintf(w, "Published:   %s (%s)\n", pkg.Name, pkg.Ecosystem)
+		_, _ = fmt.Fprintf(w, "Published:   %s (%s)\n", sanitize(pkg.Name), sanitize(pkg.Ecosystem))
 		for _, line := range packageDetailLines(pkg) {
-			_, _ = fmt.Fprintf(w, "             %s\n", line)
+			_, _ = fmt.Fprintf(w, "             %s\n", sanitizeLine(line))
 		}
 	}
 }
@@ -439,10 +423,10 @@ func ArtifactJSON(w io.Writer, a *brief.Artifact) error {
 
 // ArtifactHuman writes the artifact report in human-readable format.
 func ArtifactHuman(w io.Writer, a *brief.Artifact) {
-	_, _ = fmt.Fprintf(w, "brief %s — %s\n\n", a.Version, sanitizeLine(a.Path))
-	_, _ = fmt.Fprintf(w, "Format:      %s\n", a.Format)
+	_, _ = fmt.Fprintf(w, "brief %s — %s\n\n", sanitizeLine(a.Version), sanitizeLine(a.Path))
+	_, _ = fmt.Fprintf(w, "Format:      %s\n", sanitizeLine(a.Format))
 	if a.SHA256 != "" {
-		_, _ = fmt.Fprintf(w, "SHA256:      %s\n", a.SHA256)
+		_, _ = fmt.Fprintf(w, "SHA256:      %s\n", sanitizeLine(a.SHA256))
 	}
 	if a.Entries > 0 {
 		_, _ = fmt.Fprintf(w, "Entries:     %d files, %d native objects\n", a.Entries, len(a.NativeObjects))
@@ -451,7 +435,7 @@ func ArtifactHuman(w io.Writer, a *brief.Artifact) {
 	for _, obj := range a.NativeObjects {
 		_, _ = fmt.Fprintln(w)
 		_, _ = fmt.Fprintf(w, "Object:      %s\n", sanitizeLine(obj.Path))
-		_, _ = fmt.Fprintf(w, "  Format:    %s %s\n", obj.Format, obj.Arch)
+		_, _ = fmt.Fprintf(w, "  Format:    %s %s\n", sanitizeLine(obj.Format), sanitizeLine(obj.Arch))
 		if obj.SOName != "" {
 			_, _ = fmt.Fprintf(w, "  SOName:    %s\n", sanitizeLine(obj.SOName))
 		}
@@ -493,12 +477,12 @@ func ThreatJSON(w io.Writer, r *brief.ThreatReport) error {
 // ThreatHuman writes the threat report in human-readable format.
 func ThreatHuman(w io.Writer, r *brief.ThreatReport) {
 	if len(r.Ecosystems) > 0 {
-		_, _ = fmt.Fprintf(w, "Detected: %s\n", strings.Join(r.Ecosystems, ", "))
+		_, _ = fmt.Fprintf(w, "Detected: %s\n", sanitizeLine(strings.Join(r.Ecosystems, ", ")))
 	}
 	if len(r.Stack) > 0 {
 		names := make([]string, len(r.Stack))
 		for i, s := range r.Stack {
-			names[i] = s.Name
+			names[i] = sanitizeLine(s.Name)
 		}
 		_, _ = fmt.Fprintf(w, "Stack:    %s\n", strings.Join(names, ", "))
 	}
@@ -517,10 +501,10 @@ func ThreatHuman(w io.Writer, r *brief.ThreatReport) {
 			}
 			refs += t.OWASP
 		}
-		_, _ = fmt.Fprintf(w, "  %-18s %s  [%s]\n", t.ID, t.Title, refs)
-		_, _ = fmt.Fprintf(w, "  %-18s via %s\n", "", strings.Join(t.IntroducedBy, ", "))
+		_, _ = fmt.Fprintf(w, "  %-18s %s  [%s]\n", sanitizeLine(t.ID), sanitizeLine(t.Title), sanitizeLine(refs))
+		_, _ = fmt.Fprintf(w, "  %-18s via %s\n", "", sanitizeLine(strings.Join(t.IntroducedBy, ", ")))
 		if t.Note != "" {
-			_, _ = fmt.Fprintf(w, "  %-18s %s\n", "", t.Note)
+			_, _ = fmt.Fprintf(w, "  %-18s %s\n", "", sanitizeLine(t.Note))
 		}
 		_, _ = fmt.Fprintln(w)
 	}
@@ -547,15 +531,15 @@ func SinksHuman(w io.Writer, r *brief.SinkReport) {
 				_, _ = fmt.Fprintln(w)
 			}
 			currentTool = s.Tool
-			_, _ = fmt.Fprintf(w, "%s:\n", s.Tool)
+			_, _ = fmt.Fprintf(w, "%s:\n", sanitize(s.Tool))
 		}
-		line := fmt.Sprintf("  %-24s %-20s", s.Symbol, s.Threat)
+		line := fmt.Sprintf("  %-24s %-20s", sanitizeLine(s.Symbol), sanitizeLine(s.Threat))
 		if s.CWE != "" {
-			line += " " + s.CWE
+			line += " " + sanitizeLine(s.CWE)
 		}
 		_, _ = fmt.Fprintln(w, line)
 		if s.Note != "" {
-			_, _ = fmt.Fprintf(w, "  %-24s %s\n", "", s.Note)
+			_, _ = fmt.Fprintf(w, "  %-24s %s\n", "", sanitizeLine(s.Note))
 		}
 	}
 }
@@ -567,13 +551,13 @@ func MissingHuman(w io.Writer, r *brief.MissingReport) {
 		return
 	}
 
-	_, _ = fmt.Fprintf(w, "Detected: %s\n\n", strings.Join(r.Ecosystems, ", "))
+	_, _ = fmt.Fprintf(w, "Detected: %s\n\n", sanitizeLine(strings.Join(r.Ecosystems, ", ")))
 	_, _ = fmt.Fprintf(w, "Missing recommended tooling:\n\n")
 
 	for _, m := range r.Missing {
-		_, _ = fmt.Fprintf(w, "  %-12s No %s tool configured\n", m.Label, strings.ToLower(m.Label))
+		_, _ = fmt.Fprintf(w, "  %-12s No %s tool configured\n", sanitize(m.Label), sanitizeLine(strings.ToLower(m.Label)))
 		if m.Suggested != "" {
-			line := "Suggested: " + m.Suggested
+			line := "Suggested: " + sanitizeLine(m.Suggested)
 			if m.SuggestedCmd != "" {
 				line += " (" + sanitize(m.SuggestedCmd) + ")"
 			}
