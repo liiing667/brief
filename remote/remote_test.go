@@ -20,6 +20,71 @@ func TestResolveLocalPath(t *testing.T) {
 	if source.Origin != "" {
 		t.Errorf("Origin = %q", source.Origin)
 	}
+	if source.Kind != SourceKindLocal {
+		t.Errorf("Kind = %q", source.Kind)
+	}
+}
+
+func TestResolveRejectsFileURIAsRemoteSource(t *testing.T) {
+	source, err := Resolve(context.Background(), "file:///etc/passwd", Options{})
+	if err == nil {
+		t.Fatal("file URI was accepted as a local source")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "file") {
+		t.Errorf("error does not preserve the file source category: %v", err)
+	}
+	if source == nil {
+		t.Fatal("rejected source category was discarded")
+	}
+	if source.Kind != SourceKindRemote {
+		t.Errorf("Kind = %q, want %q", source.Kind, SourceKindRemote)
+	}
+	if source.Scheme != "file" {
+		t.Errorf("Scheme = %q, want file", source.Scheme)
+	}
+	if source.Dir != "" {
+		t.Errorf("rejected source has a scan directory: %q", source.Dir)
+	}
+}
+
+func TestResolveRejectsInsecureHTTPBeforeClone(t *testing.T) {
+	originalEnsure := ensureClone
+	originalExec := execClone
+	t.Cleanup(func() {
+		ensureClone = originalEnsure
+		execClone = originalExec
+	})
+
+	ensureClone = func(context.Context, string, string, bool) error {
+		return errors.New("unexpected HTTPS clone")
+	}
+	execClone = func(context.Context, string, string, int) error {
+		return errors.New("unexpected git clone")
+	}
+
+	source, err := Resolve(context.Background(), "HTTP://127.0.0.1:1/repo.git", Options{})
+	if err == nil {
+		t.Fatal("plaintext HTTP source was accepted")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "insecure") {
+		t.Errorf("error does not explain the insecure transport: %v", err)
+	}
+	if source == nil || source.Kind != SourceKindRemote || source.Scheme != "http" {
+		t.Errorf("rejected source category = %#v", source)
+	}
+}
+
+func TestResolveRejectsUnknownURLScheme(t *testing.T) {
+	source, err := Resolve(context.Background(), "ftp://example.com/repo", Options{})
+	if err == nil {
+		t.Fatal("unknown URL scheme was accepted")
+	}
+	if !strings.Contains(err.Error(), "ftp") {
+		t.Errorf("error does not name the rejected scheme: %v", err)
+	}
+	if source == nil || source.Kind != SourceKindRemote || source.Scheme != "ftp" {
+		t.Errorf("rejected source category = %#v", source)
+	}
 }
 
 func TestResolveHTTPSDefaultShallowAndCleanup(t *testing.T) {

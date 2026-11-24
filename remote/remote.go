@@ -19,9 +19,36 @@ import (
 
 // Source describes where a remote project came from.
 type Source struct {
-	Dir     string // local directory to scan
-	Cleanup func() // call when done (removes temp dir unless --keep)
-	Origin  string // original URL or package identifier
+	Dir     string     // local directory to scan
+	Cleanup func()     // call when done (removes temp dir unless --keep)
+	Origin  string     // original URL or package identifier
+	Kind    SourceKind // local, remote, or registry
+	Scheme  string     // lower-case URL scheme for remote sources
+}
+
+// SourceKind identifies how a source argument was classified.
+type SourceKind string
+
+const (
+	SourceKindLocal    SourceKind = "local"
+	SourceKindRemote   SourceKind = "remote"
+	SourceKindRegistry SourceKind = "registry"
+)
+
+// UnsupportedSourceError reports a source that was recognized as a URL but
+// cannot be resolved safely. Kind and Scheme retain the rejected source's
+// category for callers and error messages.
+type UnsupportedSourceError struct {
+	Kind   SourceKind
+	Scheme string
+	Reason string
+}
+
+func (e *UnsupportedSourceError) Error() string {
+	if e.Scheme == "" {
+		return fmt.Sprintf("unsupported %s source: %s", e.Kind, e.Reason)
+	}
+	return fmt.Sprintf("unsupported %s source scheme %q: %s", e.Kind, e.Scheme, e.Reason)
 }
 
 // Options configures remote source resolution.
@@ -35,7 +62,8 @@ type Options struct {
 // Resolve takes a source string and returns a local directory to scan.
 // Handles:
 //   - Local paths (returned as-is)
-//   - Git URLs (https://github.com/owner/repo)
+//   - Git URLs over https, ssh, or git@ (plain http, git://, and file URIs
+//     are rejected before cloning)
 //   - Registry shorthands (npm:lodash, gem:rails, pypi:requests, crate:serde)
 func Resolve(ctx context.Context, source string, opts Options) (*Source, error) {
 	if opts.Depth < 0 {
@@ -44,16 +72,26 @@ func Resolve(ctx context.Context, source string, opts Options) (*Source, error) 
 
 	// Check if it's a registry shorthand
 	if ecosystem, name, ok := parseRegistryShorthand(source); ok {
-		return resolveRegistryPackage(ctx, ecosystem, name, opts)
+		src, err := resolveRegistryPackage(ctx, ecosystem, name, opts)
+		if err != nil {
+			return &Source{Origin: source, Kind: SourceKindRegistry}, err
+		}
+		src.Kind = SourceKindRegistry
+		return src, nil
 	}
 
-	// Check if it's a URL
-	if isURL(source) {
+	// Classify the source before it can reach the filesystem. Unknown URL
+	// schemes must not fall through to the local-path branch.
+	kind, scheme, err := classifySource(source)
+	if err != nil {
+		return &Source{Origin: source, Kind: kind, Scheme: scheme}, err
+	}
+	if kind == SourceKindRemote {
 		return resolveGitURL(ctx, source, opts)
 	}
 
 	// Local path
-	return &Source{Dir: source, Cleanup: func() {}}, nil
+	return &Source{Dir: source, Cleanup: func() {}, Kind: SourceKindLocal}, nil
 }
 
 // parseRegistryShorthand checks if the source looks like "npm:lodash" or "gem:rails".
@@ -82,25 +120,132 @@ func parseRegistryShorthand(source string) (ecosystem, name string, ok bool) {
 	return eco, parts[1], true
 }
 
-func isURL(s string) bool {
-	return strings.HasPrefix(s, "http://") ||
-		strings.HasPrefix(s, "https://") ||
-		strings.HasPrefix(s, "git@") ||
-		strings.HasPrefix(s, "ssh://")
+func classifySource(source string) (SourceKind, string, error) {
+	if _, ok := explicitScheme(source); ok || isSCPSource(source) {
+		scheme, err := validateRemoteSource(source)
+		return SourceKindRemote, scheme, err
+	}
+	return SourceKindLocal, "", nil
+}
+
+// explicitScheme extracts a URL scheme without mistaking Windows drive letters
+// or ordinary local names containing a colon for remote sources.
+func explicitScheme(source string) (string, bool) {
+	i := strings.IndexByte(source, ':')
+	if i <= 0 {
+		return "", false
+	}
+	raw := source[:i]
+	if len(raw) == 1 && isASCIILetter(raw[0]) {
+		return "", false
+	}
+	for j := 0; j < len(raw); j++ {
+		c := raw[j]
+		if !isASCIILetter(c) && (c < '0' || c > '9') && c != '+' && c != '-' && c != '.' {
+			return "", false
+		}
+	}
+	scheme := strings.ToLower(raw)
+	// A known scheme is authoritative even without "//" so file: and http:
+	// variants are rejected instead of becoming local paths. Unknown schemes
+	// without an authority are left alone to keep local names like "dir:name".
+	if !strings.HasPrefix(source[i+1:], "//") && !knownScheme(scheme) {
+		return "", false
+	}
+	return scheme, true
+}
+
+func knownScheme(scheme string) bool {
+	switch scheme {
+	case "file", "git", "git+https", "git+ssh", "http", "https", "ssh":
+		return true
+	}
+	return false
+}
+
+func isSCPSource(source string) bool {
+	if strings.Contains(source, "://") {
+		return false
+	}
+	at := strings.IndexByte(source, '@')
+	if at <= 0 || at == len(source)-1 {
+		return false
+	}
+	rest := source[at+1:]
+	colon := strings.IndexByte(rest, ':')
+	if colon <= 0 {
+		return false
+	}
+	if slash := strings.IndexByte(rest, '/'); slash >= 0 && slash < colon {
+		return false
+	}
+	return true
+}
+
+func isASCIILetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// validateRemoteSource accepts encrypted git transports only. Plain HTTP and
+// git:// are rejected before any clone or filesystem access.
+func validateRemoteSource(source string) (string, error) {
+	scheme, ok := explicitScheme(source)
+	if !ok {
+		if isSCPSource(source) {
+			return "ssh", nil
+		}
+		return "", &UnsupportedSourceError{
+			Kind:   SourceKindRemote,
+			Reason: "expected an https, ssh, or git@ remote URL",
+		}
+	}
+	switch scheme {
+	case "https", "ssh":
+		return scheme, nil
+	case "http", "git":
+		return scheme, &UnsupportedSourceError{
+			Kind:   SourceKindRemote,
+			Scheme: scheme,
+			Reason: "insecure plaintext transport; use https or ssh",
+		}
+	case "file":
+		return scheme, &UnsupportedSourceError{
+			Kind:   SourceKindRemote,
+			Scheme: scheme,
+			Reason: "file URIs are not local directories; pass the directory path directly",
+		}
+	default:
+		return scheme, &UnsupportedSourceError{
+			Kind:   SourceKindRemote,
+			Scheme: scheme,
+			Reason: "only https, ssh, and git@ URLs are supported",
+		}
+	}
 }
 
 // resolveGitURL clones a git URL to a temp directory.
 // Preserves the original URL for cloning (SSH, HTTPS, etc.) to respect
 // the user's auth configuration.
 func resolveGitURL(ctx context.Context, url string, opts Options) (*Source, error) {
+	scheme, err := validateRemoteSource(url)
+	if err != nil {
+		return &Source{Origin: url, Kind: SourceKindRemote, Scheme: scheme}, err
+	}
 	// Parse to extract the repo name for the temp dir, but clone with the
 	// original URL to preserve transport (SSH vs HTTPS) and credentials.
-	_, _, repo, err := forges.ParseRepoURL(url)
-	if err != nil {
-		return cloneURL(ctx, url, "", opts)
+	_, _, repo, parseErr := forges.ParseRepoURL(url)
+	if parseErr != nil {
+		repo = ""
 	}
 
-	return cloneURL(ctx, url, repo, opts)
+	src, err := cloneURL(ctx, url, repo, opts)
+	if err != nil {
+		return &Source{Origin: url, Kind: SourceKindRemote, Scheme: scheme}, err
+	}
+	src.Kind = SourceKindRemote
+	src.Scheme = scheme
+
+	return src, nil
 }
 
 // resolveRegistryPackage looks up a package in its registry to find the source repo.
@@ -182,6 +327,9 @@ var execClone = func(ctx context.Context, url, dir string, depth int) error {
 }
 
 func cloneInto(ctx context.Context, url, dir string, opts Options) error {
+	if _, err := validateRemoteSource(url); err != nil {
+		return err
+	}
 	if !strings.HasPrefix(url, "https://") {
 		return execClone(ctx, url, dir, opts.Depth)
 	}
