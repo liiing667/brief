@@ -103,6 +103,7 @@ type Engine struct {
 	submodulesLoaded     bool
 	submoduleEntries     int
 	submoduleByPath      map[string]submoduleInfo
+	submoduleByIdentity  map[string]submoduleInfo
 	submoduleRoutes      map[string]bool
 	includedSubmodules   []string
 	includedSubmoduleSet map[string]bool
