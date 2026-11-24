@@ -52,12 +52,16 @@ func isMachOFat(head [4]byte) bool {
 	return m == fatMagic32 || m == fatMagic64
 }
 
-func inspectMachO(r io.ReaderAt) (*Object, []byte, error) {
+func inspectMachO(r io.ReaderAt, size int64) (*Object, []byte, error) {
 	f, err := macho.NewFile(r)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer func() { _ = f.Close() }()
+
+	if err := validateMachO(f, size); err != nil {
+		return nil, nil, err
+	}
 
 	obj, rodata := machOFromFile(f, "mach-o")
 	return obj, rodata, nil
@@ -78,9 +82,14 @@ func inspectMachOFat(r io.ReaderAt, size int64, head [4]byte) (*Object, []byte, 
 	producerSeen := make(map[string]bool)
 	var rodata bytes.Buffer
 
-	for i, sr := range slices {
+	for i, slice := range slices {
+		sr := slice.reader
 		f, err := macho.NewFile(sr)
 		if err != nil {
+			return nil, nil, fmt.Errorf("mach-o fat slice %d: %w", i, err)
+		}
+		if err := validateMachO(f, slice.size); err != nil {
+			_ = f.Close()
 			return nil, nil, fmt.Errorf("mach-o fat slice %d: %w", i, err)
 		}
 		sliceObj, sliceROData := machOFromFile(f, "mach-o")
@@ -126,7 +135,14 @@ func inspectMachOFat(r io.ReaderAt, size int64, head [4]byte) (*Object, []byte, 
 
 var errEmptyFat = errors.New("mach-o fat header has zero architectures")
 
-func readFatArches(r io.ReaderAt, size int64, head [4]byte) ([]*io.SectionReader, error) {
+// fatSlice is one architecture inside a fat container, bounded to its
+// declared extent.
+type fatSlice struct {
+	reader *io.SectionReader
+	size   int64
+}
+
+func readFatArches(r io.ReaderAt, size int64, head [4]byte) ([]fatSlice, error) {
 	is64 := stdbin.BigEndian.Uint32(head[:]) == fatMagic64
 
 	var hdr [fatHeaderLen]byte
@@ -151,7 +167,7 @@ func readFatArches(r io.ReaderAt, size int64, head [4]byte) ([]*io.SectionReader
 	}
 	tableEnd := int64(fatHeaderLen) + int64(len(table))
 
-	out := make([]*io.SectionReader, 0, narch)
+	out := make([]fatSlice, 0, narch)
 	for i := range int(narch) {
 		entry := table[i*entryLen:]
 		var off, sz int64
@@ -168,7 +184,7 @@ func readFatArches(r io.ReaderAt, size int64, head [4]byte) ([]*io.SectionReader
 		if off < tableEnd || sz <= 0 || off+sz < off || off+sz > size {
 			return nil, fmt.Errorf("mach-o fat arch %d out of bounds", i)
 		}
-		out = append(out, io.NewSectionReader(r, off, sz))
+		out = append(out, fatSlice{reader: io.NewSectionReader(r, off, sz), size: sz})
 	}
 	return out, nil
 }

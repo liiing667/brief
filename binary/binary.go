@@ -147,13 +147,13 @@ func InspectReader(r io.ReaderAt, size int64) (*Object, error) {
 func dispatch(r *io.SectionReader, size int64, head [4]byte) (*Object, []byte, error) {
 	switch {
 	case head == [4]byte{0x7f, 'E', 'L', 'F'}:
-		return inspectELF(r)
+		return inspectELF(r, size)
 	case isMachO(head):
-		return inspectMachO(r)
+		return inspectMachO(r, size)
 	case isMachOFat(head):
 		return inspectMachOFat(r, size, head)
 	case head[0] == 'M' && head[1] == 'Z':
-		return inspectPE(r)
+		return inspectPE(r, size)
 	default:
 		return nil, nil, ErrUnrecognized
 	}

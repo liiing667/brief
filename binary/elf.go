@@ -7,12 +7,23 @@ import (
 	"io"
 )
 
-func inspectELF(r io.ReaderAt) (*Object, []byte, error) {
+func inspectELF(r io.ReaderAt, size int64) (*Object, []byte, error) {
+	if err := preflightELF(r, size); err != nil {
+		return nil, nil, err
+	}
 	f, err := elf.NewFile(r)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer func() { _ = f.Close() }()
+
+	// Validate the section table before any of it is turned into reported
+	// metadata: forged counts and overlapping or out-of-bounds sections
+	// would otherwise let an untrusted sample dictate producer and
+	// static-link hints.
+	if err := validateELF(f, size); err != nil {
+		return nil, nil, err
+	}
 
 	obj := &Object{
 		Format: "elf",
@@ -41,6 +52,8 @@ func elfComment(f *elf.File) []string {
 	}
 	data, err := sec.Data()
 	if err != nil {
+		// validateELF already proved the section is in bounds, so this is
+		// a decompression or I/O failure rather than a forged offset.
 		return nil
 	}
 	var out []string
@@ -62,9 +75,11 @@ func elfROData(f *elf.File) []byte {
 	var buf bytes.Buffer
 	for _, name := range []string{".rodata", ".rdata", ".data.rel.ro"} {
 		if sec := f.Section(name); sec != nil {
-			if data, err := sec.Data(); err == nil {
-				buf.Write(data)
+			data, err := sec.Data()
+			if err != nil {
+				continue
 			}
+			buf.Write(data)
 		}
 	}
 	return buf.Bytes()

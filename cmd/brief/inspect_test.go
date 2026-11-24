@@ -139,6 +139,99 @@ func TestInspectPathArchivePEHeaderBeyondMagicPrefix(t *testing.T) {
 	}
 }
 
+// writeForgedELF builds a minimal ELF whose section headers claim more
+// sections than the file contains. It keeps the ELF magic so format
+// detection still fires, but native-object inspection must reject it.
+func writeForgedELF(tb testing.TB) string {
+	tb.Helper()
+	data := make([]byte, 128)
+	copy(data[0:4], []byte{0x7f, 'E', 'L', 'F'})
+	data[4] = 2                                 // ELFCLASS64
+	data[5] = 1                                 // ELFDATA2LSB
+	data[6] = 1                                 // EV_CURRENT
+	stdbin.LittleEndian.PutUint16(data[16:], 2) // ET_EXEC
+	stdbin.LittleEndian.PutUint16(data[18:], 0x3e)
+	stdbin.LittleEndian.PutUint32(data[20:], 1)
+	stdbin.LittleEndian.PutUint32(data[52:], 64) // e_ehsize
+	stdbin.LittleEndian.PutUint16(data[58:], 64) // e_shentsize
+	stdbin.LittleEndian.PutUint64(data[40:], 64) // e_shoff
+	stdbin.LittleEndian.PutUint16(data[60:], 32) // 32 sections, none present
+	path := filepath.Join(tb.TempDir(), "forged.elf")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		tb.Fatal(err)
+	}
+	return path
+}
+
+func writeForgedPE(tb testing.TB) string {
+	tb.Helper()
+	data := make([]byte, 108)
+	copy(data[0:2], "MZ")
+	stdbin.LittleEndian.PutUint32(data[0x3c:], 64)
+	copy(data[64:], []byte{'P', 'E', 0, 0})
+	stdbin.LittleEndian.PutUint16(data[68:], 0x8664) // machine
+	stdbin.LittleEndian.PutUint16(data[70:], 64)     // 64 sections, none present
+	path := filepath.Join(tb.TempDir(), "forged.exe")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		tb.Fatal(err)
+	}
+	return path
+}
+
+func TestInspectPathBareForgedObjectKeepsFormatDetection(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		path       string
+		wantFormat string
+	}{
+		{"elf", writeForgedELF(t), magic.FormatELF},
+		{"pe", writeForgedPE(t), magic.FormatPE},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := os.Open(tt.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			head, err := sniff(f)
+			_ = f.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if head.Format != tt.wantFormat {
+				t.Fatalf("magic detection = %q, want %q", head.Format, tt.wantFormat)
+			}
+
+			art, err := inspectPath(tt.path)
+			if err == nil {
+				t.Fatal("forged native object was not rejected")
+			}
+			if art != nil && art.Format != tt.wantFormat {
+				t.Fatalf("Format = %q, want %q preserved by magic detection", art.Format, tt.wantFormat)
+			}
+		})
+	}
+}
+
+func TestInspectPathArchiveSkipsForgedObjects(t *testing.T) {
+	hello := buildHello(t, runtime.GOOS, runtime.GOARCH)
+	archive := writeZip(t, map[string]string{
+		"bin/hello":      hello,
+		"bad/forged.elf": writeForgedELF(t),
+		"bad/forged.exe": writeForgedPE(t),
+	})
+
+	art, err := inspectPath(archive)
+	if err != nil {
+		t.Fatalf("forged archive entry aborted the whole artifact: %v", err)
+	}
+	if len(art.NativeObjects) != 1 {
+		t.Fatalf("NativeObjects = %d, want only the valid build", len(art.NativeObjects))
+	}
+	if art.NativeObjects[0].Go == nil {
+		t.Fatalf("valid build metadata missing: %+v", art.NativeObjects[0])
+	}
+}
+
 func TestInspectPathArchive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("cross-compilation skipped in -short")

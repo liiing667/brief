@@ -17,12 +17,22 @@ const (
 	peMaxDLLNameLen        = 256
 )
 
-func inspectPE(r io.ReaderAt) (*Object, []byte, error) {
+func inspectPE(r io.ReaderAt, size int64) (*Object, []byte, error) {
+	if err := preflightPE(r, size); err != nil {
+		return nil, nil, err
+	}
 	f, err := pe.NewFile(r)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer func() { _ = f.Close() }()
+
+	// Verify the section table before trusting import directories or
+	// section contents: forged section counts, raw offsets, or sizes must
+	// not drive reads or reported identities beyond the declared file.
+	if err := validatePE(f, size); err != nil {
+		return nil, nil, err
+	}
 
 	obj := &Object{
 		Format: "pe",
