@@ -407,6 +407,73 @@ func TestFilterByChangedFiles_NestedManifest(t *testing.T) {
 	}
 }
 
+func TestFilterByChangedFiles_DiffPathScopeRegression(t *testing.T) {
+	knowledgeBase := loadKB(t)
+	r := &brief.Report{
+		Tools:           make(map[string][]brief.Detection),
+		Languages:       []brief.Detection{{Name: "R"}},
+		PackageManagers: []brief.Detection{{Name: "Go Modules"}},
+		Manifests: []brief.ManifestInfo{
+			{Ecosystem: "golang", Path: "go.mod", Kind: "manifest"},
+		},
+	}
+
+	t.Run("out of scope paths ignored", func(t *testing.T) {
+		for _, changed := range []string{
+			"../go.mod",
+			"../../go.mod",
+			"nested/../../go.mod",
+			"/go.mod",
+			"../model.R",
+		} {
+			filtered := FilterByChangedFiles(r, knowledgeBase, []string{changed})
+			if len(filtered.Manifests) != 0 {
+				t.Errorf("out-of-scope path %q kept manifests: %+v", changed, filtered.Manifests)
+			}
+			if len(filtered.PackageManagers) != 0 {
+				t.Errorf("out-of-scope path %q kept package managers: %+v", changed, filtered.PackageManagers)
+			}
+			if len(filtered.Languages) != 0 {
+				t.Errorf("out-of-scope path %q kept languages: %+v", changed, filtered.Languages)
+			}
+		}
+	})
+
+	t.Run("repo relative paths still match", func(t *testing.T) {
+		for _, changed := range []string{"go.mod", "./go.mod", "nested/../go.mod"} {
+			filtered := FilterByChangedFiles(r, knowledgeBase, []string{changed})
+			if len(filtered.Manifests) != 1 || filtered.Manifests[0].Path != "go.mod" {
+				t.Errorf("relative path %q did not keep manifests: %+v", changed, filtered.Manifests)
+			}
+			if len(filtered.PackageManagers) != 1 || filtered.PackageManagers[0].Name != "Go Modules" {
+				t.Errorf("relative path %q did not keep package managers: %+v", changed, filtered.PackageManagers)
+			}
+		}
+
+		filtered := FilterByChangedFiles(r, knowledgeBase, []string{"MODEL.R"})
+		if len(filtered.Languages) != 1 || filtered.Languages[0].Name != "R" {
+			t.Errorf("uppercase extension should keep languages, got %+v", filtered.Languages)
+		}
+	})
+
+	t.Run("case variants keep resource semantics", func(t *testing.T) {
+		withResources := &brief.Report{
+			Tools:     make(map[string][]brief.Detection),
+			Resources: &brief.ResourceInfo{Readme: "README.md"},
+		}
+
+		filtered := FilterByChangedFiles(withResources, knowledgeBase, []string{"./README.MD"})
+		if filtered.Resources == nil || filtered.Resources.Readme != "README.md" {
+			t.Errorf("case variant of a relative resource path should match, got %+v", filtered.Resources)
+		}
+
+		filtered = FilterByChangedFiles(withResources, knowledgeBase, []string{"../README.MD"})
+		if filtered.Resources != nil {
+			t.Errorf("out-of-scope case variant should not match, got %+v", filtered.Resources)
+		}
+	})
+}
+
 func TestFilterByChangedFiles_NoRelevantChanges(t *testing.T) {
 	knowledgeBase := loadKB(t)
 

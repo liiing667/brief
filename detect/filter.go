@@ -13,6 +13,7 @@ import (
 // filterContext holds precomputed data used by filter helpers.
 type filterContext struct {
 	changed                map[string]bool
+	changedFiles           []string
 	changedExts            map[string]bool
 	changedDependencies    map[string]bool
 	changedDevDependencies map[string]bool
@@ -22,13 +23,16 @@ type filterContext struct {
 
 func newFilterContext(knowledgeBase *kb.KnowledgeBase, changedFiles []string) *filterContext {
 	changed := make(map[string]bool, len(changedFiles))
-	for _, f := range changedFiles {
-		changed[filepath.ToSlash(filepath.Clean(f))] = true
-	}
-
+	normalized := make([]string, 0, len(changedFiles))
 	changedExts := make(map[string]bool)
 	for _, f := range changedFiles {
-		if ext := filepath.Ext(f); ext != "" {
+		rel, ok := repoRelativePath(f)
+		if !ok {
+			continue
+		}
+		normalized = append(normalized, rel)
+		changed[rel] = true
+		if ext := filepath.Ext(rel); ext != "" {
 			changedExts[strings.ToLower(ext)] = true
 		}
 	}
@@ -47,10 +51,22 @@ func newFilterContext(knowledgeBase *kb.KnowledgeBase, changedFiles []string) *f
 
 	return &filterContext{
 		changed:         changed,
+		changedFiles:    normalized,
 		changedExts:     changedExts,
 		manifestChanged: manifestChanged,
 		kb:              knowledgeBase,
 	}
+}
+
+// repoRelativePath normalizes a diff path to a clean, slash-separated path
+// relative to the repository root. Paths that are absolute or escape the
+// repository are rejected so they cannot influence filtering.
+func repoRelativePath(file string) (string, bool) {
+	rel := filepath.ToSlash(filepath.Clean(filepath.FromSlash(file)))
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, "../") || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return rel, true
 }
 
 // FilterByChangedFiles takes a full report and returns a new report containing
@@ -75,9 +91,9 @@ func FilterByChangedFiles(r *brief.Report, knowledgeBase *kb.KnowledgeBase, chan
 	filtered.Scripts = fc.filterScripts(r.Scripts)
 	fc.filterTools(r.Tools, filtered.Tools)
 	filtered.Style = fc.filterStyle(r.Style)
-	filtered.Resources = fc.filterResources(r.Resources, changedFiles)
-	filtered.Platforms = fc.filterPlatforms(r.Platforms, changedFiles)
-	filtered.Skills = fc.filterSkills(r.Skills, changedFiles)
+	filtered.Resources = fc.filterResources(r.Resources, fc.changedFiles)
+	filtered.Platforms = fc.filterPlatforms(r.Platforms, fc.changedFiles)
+	filtered.Skills = fc.filterSkills(r.Skills, fc.changedFiles)
 
 	if fc.manifestChanged {
 		filtered.Manifests = r.Manifests
@@ -251,7 +267,8 @@ func (fc *filterContext) filterSkills(skills []brief.Skill, changedFiles []strin
 	for _, s := range skills {
 		dir := path.Dir(s.Path) + "/"
 		for _, f := range changedFiles {
-			if strings.HasPrefix(filepath.ToSlash(f), dir) {
+			rel, ok := repoRelativePath(f)
+			if ok && strings.HasPrefix(rel, dir) {
 				out = append(out, s)
 				break
 			}
@@ -266,7 +283,9 @@ func (fc *filterContext) filterResources(res *brief.ResourceInfo, changedFiles [
 	}
 	changed := make(map[string]bool, len(changedFiles))
 	for _, f := range changedFiles {
-		changed[strings.ToLower(filepath.ToSlash(f))] = true
+		if rel, ok := repoRelativePath(f); ok {
+			changed[strings.ToLower(rel)] = true
+		}
 	}
 	hit := func(p string) bool {
 		return p != "" && changed[strings.ToLower(p)]
@@ -359,7 +378,8 @@ func (fc *filterContext) filterPlatforms(plat *brief.PlatformInfo, changedFiles 
 		}
 	}
 	for _, f := range changedFiles {
-		if strings.HasPrefix(f, ".github/workflows/") {
+		rel, ok := repoRelativePath(f)
+		if ok && strings.HasPrefix(rel, ".github/workflows/") {
 			out.CIMatrixVersions = plat.CIMatrixVersions
 			out.CIMatrixOS = plat.CIMatrixOS
 			found = true
