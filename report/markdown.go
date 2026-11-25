@@ -3,6 +3,8 @@ package report
 import (
 	"fmt"
 	"io"
+	"slices"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -416,6 +418,29 @@ func ThreatMarkdown(w io.Writer, r *brief.ThreatReport) {
 	for _, t := range r.Threats {
 		_, _ = fmt.Fprintf(w, "| %s | %s | %s | %s |\n",
 			t.Title, t.CWE, t.OWASP, strings.Join(t.IntroducedBy, ", "))
+	}
+
+	// Attribute each mapping note to the real tools that produced it, so
+	// follow-up sources beyond the first match are not lost.
+	var notes []string
+	for _, t := range r.Threats {
+		for _, n := range t.Notes {
+			if n.Note == "" {
+				continue
+			}
+			entry := fmt.Sprintf("- %s (%s): %s", t.ID, strings.Join(n.Tools, ", "), n.Note)
+			if !slices.Contains(notes, entry) {
+				notes = append(notes, entry)
+			}
+		}
+	}
+	if len(notes) > 0 {
+		sort.Strings(notes)
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "Evidence:")
+		for _, n := range notes {
+			_, _ = fmt.Fprintln(w, n)
+		}
 	}
 }
 

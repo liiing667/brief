@@ -389,6 +389,76 @@ func TestThreatJSON(t *testing.T) {
 	}
 }
 
+func TestThreatHumanAttributesEveryNote(t *testing.T) {
+	r := &brief.ThreatReport{
+		Ecosystems: []string{"ruby"},
+		Stack:      []brief.StackEntry{{Name: "Rails", Evidence: []string{"Gemfile", ".github/workflows/ci.yml"}}},
+		Threats: []brief.Threat{
+			{
+				ID:           "xss",
+				CWE:          "CWE-79",
+				Title:        "Cross-Site Scripting",
+				IntroducedBy: []string{"Rails", "ViewLib"},
+				Note:         "Renders data into output, escaping is bypassable",
+				Notes: []brief.ThreatNote{
+					{Note: "Renders data into output, escaping is bypassable", Tools: []string{"Rails", "ViewLib"}},
+					{Note: "Server-side framework handling user-controlled HTTP input", Tools: []string{"Rails"}},
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	ThreatHuman(&buf, r)
+	out := buf.String()
+
+	for _, want := range []string{
+		"Renders data into output, escaping is bypassable (via Rails, ViewLib)",
+		"Server-side framework handling user-controlled HTTP input (via Rails)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\ngot:\n%s", want, out)
+		}
+	}
+}
+
+func TestThreatJSONBackwardCompatibleFields(t *testing.T) {
+	r := &brief.ThreatReport{
+		Version: "dev",
+		Path:    "/tmp/test",
+		Threats: []brief.Threat{
+			{
+				ID:           "xss",
+				CWE:          "CWE-79",
+				OWASP:        "A03:2021",
+				Title:        "Cross-Site Scripting",
+				IntroducedBy: []string{"Rails"},
+				Note:         "legacy first note",
+				Notes: []brief.ThreatNote{
+					{Note: "legacy first note", Tools: []string{"Rails"}},
+					{Note: "second source note", Tools: []string{"Rails"}},
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := ThreatJSON(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	// Existing fields and short threat IDs stay in place.
+	for _, want := range []string{`"id": "xss"`, `"introduced_by"`, `"note": "legacy first note"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("JSON missing compatible field %q\ngot:\n%s", want, out)
+		}
+	}
+	// The extra attribution is additive and omitempty keeps empty reports clean.
+	if !strings.Contains(out, `"notes"`) || !strings.Contains(out, "second source note") {
+		t.Errorf("JSON missing full notes attribution\ngot:\n%s", out)
+	}
+}
+
 func sampleSinkReport() *brief.SinkReport {
 	return &brief.SinkReport{
 		Sinks: []brief.SinkEntry{

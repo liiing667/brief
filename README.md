@@ -197,26 +197,36 @@ Stack:    ActiveRecord, Bundler, GitHub Actions, RSpec, Rails, RuboCop, Ruby
 
   auth_bypass        Authentication Bypass  [CWE-287 A07:2021]
                      via Rails
+                     Identity and session handling (via Rails)
+                     Server-side framework handling user-controlled HTTP input (via Rails)
 
   csrf               Cross-Site Request Forgery  [CWE-352 A01:2021]
                      via Rails
+                     Server-side framework handling user-controlled HTTP input (via Rails)
 
   mass_assignment    Mass Assignment  [CWE-915 A08:2021]
                      via ActiveRecord
+                     Constructs database queries, often with raw escape hatches (via ActiveRecord)
 
   sql_injection      SQL Injection  [CWE-89 A03:2021]
                      via ActiveRecord
+                     Constructs database queries, often with raw escape hatches (via ActiveRecord)
 
   ssti               Server-Side Template Injection  [CWE-1336 A03:2021]
                      via Rails
+                     Renders data into output, escaping is bypassable (via Rails)
 
   xss                Cross-Site Scripting  [CWE-79 A03:2021]
                      via Rails
+                     Renders data into output, escaping is bypassable (via Rails)
+                     Server-side framework handling user-controlled HTTP input (via Rails)
 ```
 
 Rails carries `role:framework` + `layer:backend` which fires the backend-framework mapping (XSS, CSRF, SSRF, open redirect, path traversal, auth bypass). It also carries `function:templating` which fires XSS and SSTI, and `function:authentication` which fires auth bypass and session fixation. ActiveRecord carries `function:data-mapping` which fires SQL injection and mass assignment. Tools with no taxonomy contribute nothing, so projects using only linters and formatters get an empty threat list.
 
 Match is conjunctive: a tool must carry all of a mapping's tags to fire it. `role:framework` + `layer:frontend` fires a different (smaller) set than `role:framework` + `layer:backend`, so React and Express don't get the same threats.
+
+Each threat is attributed to the real detected tools that introduce it, and every matching mapping note is retained with the tools it came from -- when a single threat is reached through more than one mapping (or from several tools), no follow-up source is dropped. The JSON keeps the original `id`, `introduced_by`, and `note` fields unchanged; the complete per-source explanations are available in the additive `notes` array (`{note, tools}`), while each contributing stack entry carries an `evidence` array listing the project-local signals (manifest entries, config files, lockfiles, CI workflows) that established the tool. A tool evidenced more than once -- for example by both a manifest and a CI workflow -- stays a single stack entry and a single introducer, so repeated hits never create extra threats or sinks.
 
 ## Sinks
 

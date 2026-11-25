@@ -325,6 +325,9 @@ type ThreatReport struct {
 type StackEntry struct {
 	Name     string    `json:"name"`
 	Taxonomy *Taxonomy `json:"taxonomy,omitempty"`
+	// Evidence lists the project-local signals (manifest entries, config files,
+	// lockfiles, CI workflows) that established the tool in this project.
+	Evidence []string `json:"evidence,omitempty"`
 }
 
 // Threat is a threat category that applies to the project's stack.
@@ -335,6 +338,17 @@ type Threat struct {
 	Title        string   `json:"title"`
 	IntroducedBy []string `json:"introduced_by"`
 	Note         string   `json:"note,omitempty"`
+	// Notes holds every distinct mapping explanation for why the threat
+	// applies, including follow-up sources beyond the first match. Each note
+	// is attributed to the real detected tools it came from.
+	Notes []ThreatNote `json:"notes,omitempty"`
+}
+
+// ThreatNote attributes a threat-mapping explanation to the detected tools
+// whose taxonomy or explicit security section produced it.
+type ThreatNote struct {
+	Note  string   `json:"note"`
+	Tools []string `json:"tools"`
 }
 
 // SinkReport is the output of brief sinks.

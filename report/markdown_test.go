@@ -404,6 +404,39 @@ func TestThreatMarkdown(t *testing.T) {
 	}
 }
 
+func TestThreatMarkdownAttributesNotes(t *testing.T) {
+	tr := &brief.ThreatReport{
+		Ecosystems: []string{"ruby"},
+		Threats: []brief.Threat{
+			{
+				ID:           "xss",
+				CWE:          "CWE-79",
+				OWASP:        "A03:2021",
+				Title:        "Cross-Site Scripting",
+				IntroducedBy: []string{"Rails"},
+				Notes: []brief.ThreatNote{
+					{Note: "Renders data into output, escaping is bypassable", Tools: []string{"Rails", "ViewLib"}},
+					{Note: "Server-side framework handling user-controlled HTTP input", Tools: []string{"Rails"}},
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	ThreatMarkdown(&buf, tr)
+	out := buf.String()
+
+	for _, want := range []string{
+		"Evidence:",
+		"- xss (Rails, ViewLib): Renders data into output, escaping is bypassable",
+		"- xss (Rails): Server-side framework handling user-controlled HTTP input",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("markdown missing %q\ngot:\n%s", want, out)
+		}
+	}
+}
+
 func TestThreatMarkdownEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	ThreatMarkdown(&buf, &brief.ThreatReport{})

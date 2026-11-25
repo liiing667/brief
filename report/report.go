@@ -519,7 +519,13 @@ func ThreatHuman(w io.Writer, r *brief.ThreatReport) {
 		}
 		_, _ = fmt.Fprintf(w, "  %-18s %s  [%s]\n", t.ID, t.Title, refs)
 		_, _ = fmt.Fprintf(w, "  %-18s via %s\n", "", strings.Join(t.IntroducedBy, ", "))
-		if t.Note != "" {
+		// Every matching source is attributed to the real tools it came from;
+		// fall back to the legacy single note for reports built without notes.
+		if len(t.Notes) > 0 {
+			for _, n := range t.Notes {
+				_, _ = fmt.Fprintf(w, "  %-18s %s (via %s)\n", "", n.Note, strings.Join(n.Tools, ", "))
+			}
+		} else if t.Note != "" {
 			_, _ = fmt.Fprintf(w, "  %-18s %s\n", "", t.Note)
 		}
 		_, _ = fmt.Fprintln(w)

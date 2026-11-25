@@ -185,6 +185,146 @@ func TestThreatModelDeduplicatesIntroducers(t *testing.T) {
 	}
 }
 
+func TestThreatModelDeduplicatesRepeatedTool(t *testing.T) {
+	// The same real tool can be evidenced more than once (e.g. a manifest
+	// hit and a CI workflow hit). Repeated detections must not create extra
+	// threats or stack entries, and the project-local evidence is merged.
+	base := &kb.KnowledgeBase{
+		ByName: map[string]*kb.ToolDef{
+			"ToolA": {
+				Tool:     kb.ToolInfo{Name: "ToolA"},
+				Taxonomy: kb.Taxonomy{Function: []string{"templating"}},
+			},
+		},
+		Threats: map[string]kb.ThreatDef{
+			"xss":  {ID: "xss", CWE: "CWE-79", Title: "XSS"},
+			"ssti": {ID: "ssti", CWE: "CWE-1336", Title: "SSTI"},
+		},
+		ThreatMappings: []kb.ThreatMapping{
+			{Match: []string{"function:templating"}, Threats: []string{"xss", "ssti"}, Note: "Renders data into output"},
+		},
+	}
+
+	r := &brief.Report{
+		Tools: map[string][]brief.Detection{
+			"build": {
+				{Name: "ToolA", ConfigFiles: []string{"package.json"}},
+				{Name: "ToolA", ConfigFiles: []string{".github/workflows/ci.yml"}},
+			},
+		},
+	}
+
+	tr := syntheticEngine(base).ThreatModel(r)
+
+	if len(tr.Threats) != 2 {
+		t.Fatalf("expected 2 distinct threats, got %d: %+v", len(tr.Threats), tr.Threats)
+	}
+	for _, th := range tr.Threats {
+		if got := th.IntroducedBy; len(got) != 1 || got[0] != "ToolA" {
+			t.Errorf("%s introduced_by = %v, want [ToolA] once", th.ID, got)
+		}
+	}
+
+	if len(tr.Stack) != 1 {
+		t.Fatalf("expected 1 stack entry for the repeated tool, got %+v", tr.Stack)
+	}
+	wantEvidence := []string{"package.json", ".github/workflows/ci.yml"}
+	if got := tr.Stack[0].Evidence; !slices.Equal(got, wantEvidence) {
+		t.Errorf("stack evidence = %v, want %v", got, wantEvidence)
+	}
+}
+
+func TestThreatModelRetainsAllMappingNotes(t *testing.T) {
+	// When a threat is reached through more than one mapping (or from more
+	// than one tool), every note survives and is attributed to the real tool
+	// that produced it. The legacy Note field keeps the first note only.
+	base := &kb.KnowledgeBase{
+		ByName: map[string]*kb.ToolDef{
+			"Rails": {
+				Tool: kb.ToolInfo{Name: "Rails"},
+				Taxonomy: kb.Taxonomy{
+					Role:       []string{"framework"},
+					Function:   []string{"templating"},
+					Layer:      []string{"backend"},
+					Technology: nil,
+				},
+			},
+			"ViewLib": {
+				Tool:     kb.ToolInfo{Name: "ViewLib"},
+				Taxonomy: kb.Taxonomy{Function: []string{"templating"}},
+			},
+		},
+		Threats: map[string]kb.ThreatDef{
+			"xss": {ID: "xss", CWE: "CWE-79", Title: "XSS"},
+		},
+		ThreatMappings: []kb.ThreatMapping{
+			{Match: []string{"function:templating"}, Threats: []string{"xss"}, Note: "Renders data into output, escaping is bypassable"},
+			{Match: []string{"role:framework", "layer:backend"}, Threats: []string{"xss"}, Note: "Server-side framework handling user-controlled HTTP input"},
+		},
+	}
+
+	r := &brief.Report{
+		Tools: map[string][]brief.Detection{
+			"build": {{Name: "Rails"}, {Name: "ViewLib"}},
+		},
+	}
+
+	tr := syntheticEngine(base).ThreatModel(r)
+
+	if len(tr.Threats) != 1 {
+		t.Fatalf("expected one xss threat, got %+v", tr.Threats)
+	}
+	th := tr.Threats[0]
+	if th.ID != "xss" {
+		t.Fatalf("threat id = %q, want xss", th.ID)
+	}
+	if !slices.Equal(th.IntroducedBy, []string{"Rails", "ViewLib"}) {
+		t.Errorf("introduced_by = %v, want [Rails ViewLib]", th.IntroducedBy)
+	}
+	if th.Note == "" {
+		t.Error("legacy note should still be populated for JSON compatibility")
+	}
+
+	byNote := make(map[string][]string)
+	for _, n := range th.Notes {
+		byNote[n.Note] = n.Tools
+	}
+	if len(byNote) != 2 {
+		t.Fatalf("expected both mapping notes, got %+v", th.Notes)
+	}
+	templatingNote := "Renders data into output, escaping is bypassable"
+	frameworkNote := "Server-side framework handling user-controlled HTTP input"
+	if got := byNote[templatingNote]; !slices.Equal(got, []string{"Rails", "ViewLib"}) {
+		t.Errorf("templating note tools = %v, want [Rails ViewLib]", got)
+	}
+	if got := byNote[frameworkNote]; !slices.Equal(got, []string{"Rails"}) {
+		t.Errorf("framework note tools = %v, want [Rails]", got)
+	}
+}
+
+func TestUniqueDetectionsMergesEvidence(t *testing.T) {
+	in := []brief.Detection{
+		{Name: "A", ConfigFiles: []string{"manifest.yml"}, Lockfile: "manifest.lock"},
+		{Name: "A", ConfigFiles: []string{".github/workflows/ci.yml", "manifest.yml"}},
+		{Name: "B", ConfigFiles: []string{"B.toml"}},
+	}
+
+	got := uniqueDetections(in)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 unique tools, got %+v", got)
+	}
+	if got[0].Name != "A" || got[1].Name != "B" {
+		t.Fatalf("unexpected order/names: %+v", got)
+	}
+	wantFiles := []string{"manifest.yml", ".github/workflows/ci.yml"}
+	if !slices.Equal(got[0].ConfigFiles, wantFiles) {
+		t.Errorf("merged config files = %v, want %v", got[0].ConfigFiles, wantFiles)
+	}
+	if got[0].Lockfile != "manifest.lock" {
+		t.Errorf("lockfile = %q, want manifest.lock", got[0].Lockfile)
+	}
+}
+
 func TestThreatModelExplicitThreats(t *testing.T) {
 	// A tool with no taxonomy but explicit [security].threats should still contribute.
 	base := &kb.KnowledgeBase{
@@ -204,6 +344,17 @@ func TestThreatModelExplicitThreats(t *testing.T) {
 
 	if len(tr.Threats) != 1 || tr.Threats[0].ID != "ssrf" {
 		t.Fatalf("expected ssrf threat, got %v", tr.Threats)
+	}
+	// Explicit threats carry no mapping note: the legacy Note stays empty and
+	// the additive Notes slice is omitted from JSON rather than holding blanks.
+	if tr.Threats[0].Note != "" {
+		t.Errorf("explicit threat note = %q, want empty", tr.Threats[0].Note)
+	}
+	if len(tr.Threats[0].Notes) != 0 {
+		t.Errorf("explicit threat notes = %v, want empty", tr.Threats[0].Notes)
+	}
+	if !slices.Equal(tr.Threats[0].IntroducedBy, []string{"Bare"}) {
+		t.Errorf("introduced_by = %v, want [Bare]", tr.Threats[0].IntroducedBy)
 	}
 }
 
@@ -352,6 +503,43 @@ func TestSinksFillsCWEFromRegistry(t *testing.T) {
 	}
 	if sr.Sinks[0].CWE != "CWE-79" {
 		t.Errorf("CWE = %q, want CWE-79 from registry", sr.Sinks[0].CWE)
+	}
+}
+
+func TestSinksDeduplicatesRepeatedTool(t *testing.T) {
+	// Repeated detections of the same tool (manifest + CI evidence) must not
+	// duplicate its known sinks.
+	base := &kb.KnowledgeBase{
+		ByName: map[string]*kb.ToolDef{
+			"Lib": {
+				Tool: kb.ToolInfo{Name: "Lib"},
+				Security: kb.SecurityInfo{
+					Sinks: []kb.Sink{
+						{Symbol: "danger", Threat: "xss"},
+					},
+				},
+			},
+		},
+		Threats: map[string]kb.ThreatDef{
+			"xss": {ID: "xss", CWE: "CWE-79", Title: "XSS"},
+		},
+	}
+
+	r := &brief.Report{
+		Tools: map[string][]brief.Detection{
+			"build": {
+				{Name: "Lib", ConfigFiles: []string{"package.json"}},
+				{Name: "Lib", ConfigFiles: []string{".github/workflows/ci.yml"}},
+			},
+		},
+	}
+	sr := syntheticEngine(base).Sinks(r)
+
+	if len(sr.Sinks) != 1 {
+		t.Fatalf("expected 1 sink for the repeated tool, got %+v", sr.Sinks)
+	}
+	if sr.Sinks[0].Tool != "Lib" || sr.Sinks[0].Symbol != "danger" {
+		t.Errorf("unexpected sink entry: %+v", sr.Sinks[0])
 	}
 }
 
