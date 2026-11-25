@@ -218,8 +218,28 @@ type LineCount struct {
 // NotebookInfo contains bounded Jupyter source statistics, separate from line counters.
 type NotebookInfo struct {
 	Files        []NotebookFile `json:"files"`
+	Budget       NotebookBudget `json:"budget"`
 	ReadBytes    int64          `json:"read_bytes"`
 	SkippedFiles int            `json:"skipped_files"`
+}
+
+// NotebookBudget describes an independent admission budget for notebooks.
+type NotebookBudget struct {
+	MaxFiles      int                     `json:"max_files"`
+	MaxFileBytes  int64                   `json:"max_file_bytes"`
+	MaxTotalBytes int64                   `json:"max_total_bytes"`
+	MaxCellBytes  int                     `json:"max_cell_bytes"`
+	MaxCells      int                     `json:"max_cells"`
+	MaxDepth      int                     `json:"max_depth"`
+	Failures      []NotebookBudgetFailure `json:"failures,omitempty"`
+}
+
+// NotebookBudgetFailure identifies a notebook that could not be admitted.
+type NotebookBudgetFailure struct {
+	Path     string `json:"path"`
+	Status   string `json:"status"`
+	Limit    int64  `json:"limit,omitempty"`
+	Observed int64  `json:"observed,omitempty"`
 }
 
 // NotebookFile describes code cells without returning code or saved outputs.
