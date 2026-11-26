@@ -13,21 +13,62 @@ func (e *Engine) pathRoles(rel string) roles.Set {
 	if labels, ok := e.fileRoles[rel]; ok {
 		return labels
 	}
-	local := filepath.ToSlash(e.pathAtAnalysisRoot(rel))
-	if strings.HasSuffix(rel, "/") {
-		local += "/"
-	}
-	labels, err := roles.Match(local)
+	labels, err := roles.Match(e.localEvidencePath(rel))
 	if err != nil {
 		return 0
 	}
 	return labels
 }
 
+// localEvidencePath returns rel relative to the containing analysis root. An
+// included submodule keeps its own path semantics even if the submodule itself
+// sits below a conventional bundled directory such as vendor/.
+func (e *Engine) localEvidencePath(rel string) string {
+	local := filepath.ToSlash(e.pathAtAnalysisRoot(rel))
+	if strings.HasSuffix(rel, "/") {
+		local += "/"
+	}
+	return local
+}
+
 func (e *Engine) projectEvidence(rel string) bool {
-	labels := e.pathRoles(rel)
-	return !labels.Has(roles.Vendor) && !labels.Has(roles.Fixture) &&
-		!labels.Has(roles.Cache) && !labels.Has(roles.BuildOutput)
+	if e.pathRoles(rel).BundledOrDerived() {
+		return false
+	}
+	// The bounded scan skips these directories entirely. Treat their contents
+	// the same way when a caller asks about a specific path.
+	return !skippedEvidencePath(e.localEvidencePath(rel))
+}
+
+// bundledEvidencePath reports whether rel belongs to content that the bounded
+// scan never treats as project evidence: fixtures, vendored code, caches and
+// build output. Changed-file filtering uses the same rule so a commit that only
+// touches bundled content cannot make an unrelated detection relevant.
+func bundledEvidencePath(rel string) bool {
+	slash := filepath.ToSlash(rel)
+	cleaned := filepath.ToSlash(filepath.Clean(rel))
+	if strings.HasSuffix(slash, "/") && cleaned != "." && cleaned != "" {
+		cleaned += "/"
+	}
+	if cleaned != "." && cleaned != "" {
+		if labels, err := roles.Match(cleaned); err == nil && labels.BundledOrDerived() {
+			return true
+		}
+	}
+	return skippedEvidencePath(rel)
+}
+
+func skippedEvidencePath(rel string) bool {
+	cleaned := filepath.ToSlash(filepath.Clean(rel))
+	if cleaned == "." || cleaned == "" {
+		return false
+	}
+	for _, part := range strings.Split(cleaned, "/") {
+		if defaultSkipDirs[part] {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) languageEvidence(rel string) bool {

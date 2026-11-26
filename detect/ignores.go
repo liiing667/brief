@@ -135,6 +135,9 @@ func (e *Engine) ignoredProjectPath(rel string, isDir bool) bool {
 }
 
 func (e *Engine) readEvidenceFile(file string) ([]byte, error) {
+	if !e.projectEvidence(file) {
+		return nil, fs.ErrNotExist
+	}
 	if e.ignoredProjectPath(file, false) {
 		return nil, fs.ErrNotExist
 	}

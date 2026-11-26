@@ -13,6 +13,7 @@ import (
 // filterContext holds precomputed data used by filter helpers.
 type filterContext struct {
 	changed                map[string]bool
+	changedFiles           []string
 	changedExts            map[string]bool
 	changedDependencies    map[string]bool
 	changedDevDependencies map[string]bool
@@ -22,13 +23,16 @@ type filterContext struct {
 
 func newFilterContext(knowledgeBase *kb.KnowledgeBase, changedFiles []string) *filterContext {
 	changed := make(map[string]bool, len(changedFiles))
-	for _, f := range changedFiles {
-		changed[filepath.ToSlash(filepath.Clean(f))] = true
-	}
-
+	normalized := make([]string, 0, len(changedFiles))
 	changedExts := make(map[string]bool)
 	for _, f := range changedFiles {
-		if ext := filepath.Ext(f); ext != "" {
+		rel := filepath.ToSlash(filepath.Clean(f))
+		if rel == "" || rel == "." || bundledEvidencePath(rel) {
+			continue
+		}
+		normalized = append(normalized, rel)
+		changed[rel] = true
+		if ext := filepath.Ext(rel); ext != "" {
 			changedExts[strings.ToLower(ext)] = true
 		}
 	}
@@ -47,6 +51,7 @@ func newFilterContext(knowledgeBase *kb.KnowledgeBase, changedFiles []string) *f
 
 	return &filterContext{
 		changed:         changed,
+		changedFiles:    normalized,
 		changedExts:     changedExts,
 		manifestChanged: manifestChanged,
 		kb:              knowledgeBase,
@@ -75,9 +80,9 @@ func FilterByChangedFiles(r *brief.Report, knowledgeBase *kb.KnowledgeBase, chan
 	filtered.Scripts = fc.filterScripts(r.Scripts)
 	fc.filterTools(r.Tools, filtered.Tools)
 	filtered.Style = fc.filterStyle(r.Style)
-	filtered.Resources = fc.filterResources(r.Resources, changedFiles)
-	filtered.Platforms = fc.filterPlatforms(r.Platforms, changedFiles)
-	filtered.Skills = fc.filterSkills(r.Skills, changedFiles)
+	filtered.Resources = fc.filterResources(r.Resources, fc.changedFiles)
+	filtered.Platforms = fc.filterPlatforms(r.Platforms, fc.changedFiles)
+	filtered.Skills = fc.filterSkills(r.Skills, fc.changedFiles)
 
 	if fc.manifestChanged {
 		filtered.Manifests = r.Manifests

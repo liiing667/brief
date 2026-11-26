@@ -234,6 +234,71 @@ func TestFilterByChangedFiles_Tools(t *testing.T) {
 	}
 }
 
+func TestFilterByChangedFiles_IgnoresBundledEvidence(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectFile(t, dir, "go.mod", "module example.com/app\n\ngo 1.24\n")
+	writeProjectFile(t, dir, "main.go", "package main\n")
+	writeProjectFile(t, dir, "main.tf", "resource \"null_resource\" \"real\" {}\n")
+	writeProjectFile(t, dir, "testdata/fixtures/main.tf", "resource \"null_resource\" \"fixture\" {}\n")
+	writeProjectFile(t, dir, ".gitleaks.toml", "title = \"real\"\n")
+	writeProjectFile(t, dir, "testdata/fixtures/.gitleaks.toml", "title = \"fixture\"\n")
+	writeProjectFile(t, dir, "deploy/app.yaml", "apiVersion: argoproj.io/v1alpha1\nkind: Application\n")
+	writeProjectFile(t, dir, "build/generated.yaml", "apiVersion: argoproj.io/v1alpha1\nkind: Application\n")
+	writeProjectFile(t, dir, "fixtures/deploy.yaml", "apiVersion: argoproj.io/v1alpha1\nkind: Application\n")
+	writeProjectFile(t, dir, "k8s/deployment.yaml", "apiVersion: apps/v1\nkind: Deployment\n")
+	writeProjectFile(t, dir, "testdata/fixtures/k8s/deployment.yaml", "apiVersion: apps/v1\nkind: Deployment\n")
+
+	report := runOn(t, dir)
+	assertToolDetected(t, report, "infrastructure", "Terraform")
+	assertToolDetected(t, report, "infrastructure", "Argo CD")
+	assertToolDetected(t, report, "infrastructure", "Kubernetes")
+	assertToolDetected(t, report, "security", "Gitleaks")
+
+	for _, changed := range []string{
+		"testdata/fixtures/main.tf",
+		"testdata/fixtures/.gitleaks.toml",
+		"build/generated.yaml",
+		"fixtures/deploy.yaml",
+	} {
+		filtered := FilterByChangedFiles(report, loadKB(t), []string{changed})
+		if len(filtered.Tools) != 0 {
+			t.Errorf("bundled path %q kept tools: %+v", changed, filtered.Tools)
+		}
+	}
+
+	filtered := FilterByChangedFiles(report, loadKB(t), []string{"deploy/app.yaml"})
+	assertToolDetected(t, filtered, "infrastructure", "Argo CD")
+
+	filtered = FilterByChangedFiles(report, loadKB(t), []string{"k8s/deployment.yaml"})
+	assertToolDetected(t, filtered, "infrastructure", "Kubernetes")
+
+	filtered = FilterByChangedFiles(report, loadKB(t), []string{".gitleaks.toml"})
+	assertToolDetected(t, filtered, "security", "Gitleaks")
+
+	filtered = FilterByChangedFiles(report, loadKB(t), []string{"main.tf"})
+	assertToolDetected(t, filtered, "infrastructure", "Terraform")
+}
+
+func TestRunToolsIgnoresBundledChangedFiles(t *testing.T) {
+	knowledgeBase := loadKB(t)
+	dir := t.TempDir()
+	writeProjectFile(t, dir, "main.tf", "resource \"null_resource\" \"real\" {}\n")
+	writeProjectFile(t, dir, "testdata/fixtures/main.tf", "resource \"null_resource\" \"fixture\" {}\n")
+
+	scan, err := New(knowledgeBase, dir).RunTools(ToolScanOptions{
+		ChangedFiles: []string{"testdata/fixtures/main.tf"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if scanCheckedTool(scan, "infrastructure", "Terraform") {
+		t.Error("fixture change should not recheck Terraform")
+	}
+	if scanHasTool(scan, "infrastructure", "Terraform") {
+		t.Error("fixture change should not report Terraform")
+	}
+}
+
 func TestFilterByChangedFiles_NestedDetectionPatterns(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "analysis/nested/model.R", "x <- 1\n")

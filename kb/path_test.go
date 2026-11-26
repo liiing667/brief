@@ -17,6 +17,8 @@ func TestMatchPathPattern(t *testing.T) {
 		{pattern: "**/qodana.y*ml", path: "qodana.yml", want: true},
 		{pattern: "**/qodana.y*ml", path: "config/qodana.yaml", want: true},
 		{pattern: "*.spdx.json", path: "nested/project.spdx.json", want: false},
+		{pattern: "k8s/", path: "k8s/deployment.yaml", want: true},
+		{pattern: "testdata/fixtures/", path: "testdata/fixtures/app.yaml", want: true},
 	} {
 		if got := kb.MatchPathPattern(test.pattern, test.path); got != test.want {
 			t.Errorf("MatchPathPattern(%q, %q) = %t, want %t", test.pattern, test.path, got, test.want)
@@ -39,6 +41,36 @@ func TestToolMatchesPath(t *testing.T) {
 	}
 }
 
+func TestToolMatchesPathRespectsRolesAndDirectories(t *testing.T) {
+	t.Parallel()
+
+	kubernetes := &kb.ToolDef{
+		Detect: kb.DetectInfo{Files: []string{"k8s/"}},
+	}
+	if !kubernetes.MatchesPath("k8s/deployment.yaml") {
+		t.Error("real deployment configuration should match the Kubernetes directory signal")
+	}
+	if kubernetes.MatchesPath("testdata/fixtures/k8s/deployment.yaml") {
+		t.Error("fixture deployment configuration should not be evidence")
+	}
+
+	qodana := &kb.ToolDef{
+		Detect: kb.DetectInfo{Files: []string{"**/qodana.yaml"}},
+	}
+	if !qodana.MatchesPath("services/api/qodana.yaml") {
+		t.Error("nested project configuration should match")
+	}
+	if qodana.MatchesPath("testdata/fixtures/qodana.yaml") {
+		t.Error("test fixture should not be evidence")
+	}
+	if qodana.MatchesPath("vendor/example/qodana.yaml") {
+		t.Error("vendored configuration should not be evidence")
+	}
+	if qodana.MatchesPath("build/qodana.yaml") {
+		t.Error("build output should not be evidence")
+	}
+}
+
 func TestResourceMatchesPath(t *testing.T) {
 	t.Parallel()
 
@@ -56,6 +88,9 @@ func TestResourceMatchesPath(t *testing.T) {
 	sbom := kb.ResourceInfo{Patterns: []string{"*.spdx.json"}, Recursive: true}
 	if !sbom.MatchesPath("packages/api/service.SPDX.JSON") {
 		t.Fatal("recursive resource did not match nested path")
+	}
+	if sbom.MatchesPath("testdata/fixtures/service.spdx.json") {
+		t.Fatal("recursive resource matched a test fixture")
 	}
 }
 

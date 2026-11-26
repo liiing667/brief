@@ -2045,6 +2045,9 @@ func (e *Engine) findResource(r kb.ResourceInfo) string {
 				if dir != "." {
 					relPath = path.Join(dir, name)
 				}
+				if !e.projectEvidence(relPath) {
+					continue
+				}
 				return relPath
 			}
 		}
